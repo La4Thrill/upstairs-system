@@ -212,12 +212,15 @@
         <div class="metric"><div class="k">已爬楼层</div><div class="v" id="climbed-v">--</div></div>
         <div class="metric"><div class="k">总台阶数</div><div class="v" id="steps-v">--</div></div>
         <div class="metric"><div class="k">步频 (级/分)</div><div class="v" id="speed-v">--</div></div>
-        <div class="metric"><div class="k">中间平台数</div><div class="v" id="half-v">--</div></div>
+        <div class="metric"><div class="k">中间平台数（半层）</div><div class="v" id="half-v">--</div></div>
         <div class="metric"><div class="k">当前状态</div><div class="v" id="state-v" style="font-size:18px;">--</div></div>
     </div>
     <div style="margin-top:10px;font-size:13px;color:#4b5563;">
         最近事件：<b id="last-event">--</b>
         <span style="margin-left:12px;">提示音：<b id="last-hint">--</b></span>
+        <span style="margin-left:12px;">梯段总数：<b id="flights-v">--</b></span>
+        <span style="margin-left:12px;">发送样本数：<b id="samples-v">--</b></span>
+        <span style="margin-left:12px;">工作时间：<b id="worktime-v">--</b></span>
         <span style="margin-left:12px;">每层台阶数：<b id="spf-v">--</b></span>
         <span style="margin-left:12px;">采样率：<b id="fs-v">--</b> Hz</span>
         <span style="margin-left:12px;">阈值：<b id="thr-v">--</b> g</span>
@@ -275,11 +278,28 @@
     let currentRole = '';
     let currentDevice = '';
     let devices = [];
+    let refreshTimer = null;
+
+    /* 设备名 / 用户名是外部可写的（/api/ingest 的 name 字段），
+       直接拼进 innerHTML 就是存储型 XSS。所有插入前都过一遍。 */
+    function esc(v) {
+        return String(v === null || v === undefined ? '' : v)
+            .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    }
 
     function setMsg(text, isErr = false) {
         const el = document.getElementById('msg');
         el.textContent = text;
         el.style.color = isErr ? '#dc2626' : '#374151';
+    }
+
+    /* 把秒数格式化成 mm:ss（课题统一要求里的"工作时间计时"） */
+    function fmtDuration(sec) {
+        const s = Math.max(0, Math.floor(Number(sec) || 0));
+        const m = Math.floor(s / 60);
+        const r = s % 60;
+        return `${String(m).padStart(2, '0')}:${String(r).padStart(2, '0')}`;
     }
 
     function apiFetch(path, options = {}) {
@@ -288,6 +308,44 @@
             options.headers['X-Auth-Token'] = authToken;
         }
         return fetch(path, options);
+    }
+
+    /* 登录态放 sessionStorage：刷新页面不用重新登录（答辩演示时省事） */
+    const SESSION_KEY = 'dsh_stair_session';
+
+    function saveSession(data) {
+        try {
+            sessionStorage.setItem(SESSION_KEY, JSON.stringify({
+                token: data.token, role: data.role,
+                username: data.username, nickname: data.nickname || ''
+            }));
+        } catch (e) { /* 隐私模式忽略 */ }
+    }
+
+    function loadSession() {
+        try {
+            const raw = sessionStorage.getItem(SESSION_KEY);
+            return raw ? JSON.parse(raw) : null;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    function clearSession() {
+        try { sessionStorage.removeItem(SESSION_KEY); } catch (e) { /* ignore */ }
+    }
+
+    function enterApp(data) {
+        document.getElementById('login-user').textContent = data.username || '-';
+        document.getElementById('login-role').textContent = data.role || '-';
+
+        document.getElementById('login-panel').classList.add('hidden');
+        ['app-panel', 'devices-panel', 'metrics-panel', 'wave-panel', 'history-panel', 'collectors-panel']
+            .forEach(id => document.getElementById(id).classList.remove('hidden'));
+
+        if (currentRole === 'admin' || currentRole === 'monitor') {
+            document.getElementById('sim-panel').classList.remove('hidden');
+        }
     }
 
     async function login() {
@@ -308,17 +366,9 @@
         const data = await res.json();
         authToken = data.token;
         currentRole = data.role;
+        saveSession(data);
 
-        document.getElementById('login-user').textContent = data.username;
-        document.getElementById('login-role').textContent = data.role;
-
-        document.getElementById('login-panel').classList.add('hidden');
-        ['app-panel', 'devices-panel', 'metrics-panel', 'wave-panel', 'history-panel', 'collectors-panel']
-            .forEach(id => document.getElementById(id).classList.remove('hidden'));
-
-        if (currentRole === 'admin' || currentRole === 'monitor') {
-            document.getElementById('sim-panel').classList.remove('hidden');
-        }
+        enterApp(data);
 
         setMsg(`登录成功，角色：${data.role}`);
         await refreshDevices();
@@ -326,6 +376,34 @@
         await fetchStatus();
         await fetchHistory();
         startAutoRefresh();
+    }
+
+    /* 页面加载时尝试用 sessionStorage 里的 token 恢复会话 */
+    async function restoreSession() {
+        const saved = loadSession();
+        if (!saved || !saved.token) return false;
+
+        authToken = saved.token;
+        currentRole = saved.role;
+
+        const res = await apiFetch('/api/session');
+        if (!res.ok) {
+            authToken = '';
+            currentRole = '';
+            clearSession();
+            return false;
+        }
+
+        const data = await res.json();
+        currentRole = data.role;
+        enterApp({ username: data.username, role: data.role });
+        setMsg(`已恢复上次登录会话（${data.username} / ${data.role}）`);
+        await refreshDevices();
+        await fetchCollectors();
+        await fetchStatus();
+        await fetchHistory();
+        startAutoRefresh();
+        return true;
     }
 
     async function refreshDevices() {
@@ -341,7 +419,7 @@
         const sel = document.getElementById('device-select');
         const prev = currentDevice || sel.value;
         sel.innerHTML = devices.map(d =>
-            `<option value="${d.device_id}">${d.device_id} · ${d.username || d.name || ''}${d.stair_mode ? ' · 判层' : ' · 只计步'}</option>`
+            `<option value="${esc(d.device_id)}">${esc(d.device_id)} · ${esc(d.username || d.name || '')}${d.stair_mode ? ' · 判层' : ' · 只计步'}</option>`
         ).join('');
 
         if (devices.length > 0) {
@@ -357,7 +435,7 @@
             const prevTarget = tsel.value;
             tsel.innerHTML = '<option value="all">全部终端</option>' +
                 devices.filter(d => d.source === 'sim')
-                       .map(d => `<option value="${d.device_id}">${d.device_id}</option>`).join('');
+                       .map(d => `<option value="${esc(d.device_id)}">${esc(d.device_id)}</option>`).join('');
             if (prevTarget && Array.from(tsel.options).some(o => o.value === prevTarget)) {
                 tsel.value = prevTarget;
             }
@@ -377,10 +455,11 @@
             const online = d.online ? '<span class="badge online">在线</span>' : '<span class="badge offline">离线</span>';
             const last = d.last_seen ? new Date(d.last_seen * 1000).toLocaleTimeString() : '--';
             const cls = d.device_id === currentDevice ? ' class="selected"' : '';
-            return `<tr${cls} onclick="selectDevice('${d.device_id}')" style="cursor:pointer">
-                <td>${d.device_id}</td>
+            const did = esc(d.device_id).replace(/'/g, '&#39;');
+            return `<tr${cls} onclick="selectDevice('${did}')" style="cursor:pointer">
+                <td>${esc(d.device_id)}</td>
                 <td>${d.source === 'sim' ? '模拟终端' : '真实设备'}</td>
-                <td>${d.username || '-'}</td>
+                <td>${esc(d.username) || '-'}</td>
                 <td>${online}</td>
                 <td>${d.current_floor}</td>
                 <td>${d.steps}</td>
@@ -412,6 +491,7 @@
         authToken = '';
         currentRole = '';
         currentDevice = '';
+        clearSession();
         location.reload();
     }
 
@@ -603,13 +683,16 @@
         document.getElementById('climbed-v').textContent = data.climbed_floors ?? '--';
         document.getElementById('steps-v').textContent = data.steps ?? '--';
         document.getElementById('speed-v').textContent = data.speed ? Number(data.speed).toFixed(1) : '0.0';
-        document.getElementById('half-v').textContent = data.half_flights ?? '--';
+        document.getElementById('half-v').textContent = data.mid_platforms ?? '--';
+        document.getElementById('flights-v').textContent = data.half_flights ?? '--';
         document.getElementById('state-v').textContent = data.on_platform ? '平台停留' : (data.running ? '行进中' : '未运行');
         document.getElementById('last-event').textContent = data.last_event || '--';
         document.getElementById('last-hint').textContent = data.last_hint || '--';
         document.getElementById('spf-v').textContent = data.steps_per_floor ?? '--';
         document.getElementById('fs-v').textContent = data.fs ?? '--';
         document.getElementById('thr-v').textContent = data.step_thr ? Number(data.step_thr).toFixed(2) : '--';
+        document.getElementById('samples-v').textContent = data.samples ?? '--';
+        document.getElementById('worktime-v').textContent = fmtDuration(data.work_seconds);
 
         const gyroEl = document.getElementById('gyro-v');
         const gyroHint = document.getElementById('gyro-hint');
@@ -660,8 +743,8 @@
 
         tbody.innerHTML = list.map(item =>
             `<tr>
-                <td>${item.time || ''}</td>
-                <td>${item.device_id || ''}</td>
+                <td>${esc(item.time)}</td>
+                <td>${esc(item.device_id)}</td>
                 <td>${item.floor ?? '-'}</td>
                 <td>${item.climbed ?? '-'}</td>
                 <td>${item.step ?? '-'}</td>
@@ -682,15 +765,26 @@
         }
 
         tbody.innerHTML = list.map(item =>
-            `<tr><td>${item.id}</td><td>${item.username}</td><td>${item.nickname || ''}</td></tr>`
+            `<tr><td>${esc(item.id)}</td><td>${esc(item.username)}</td><td>${esc(item.nickname)}</td></tr>`
         ).join('');
     }
 
     function startAutoRefresh() {
-        setInterval(fetchStatus, 1000);
-        setInterval(refreshDevices, 3000);
-        setInterval(fetchHistory, 5000);
+        if (refreshTimer) return;   /* 防止重复登录后叠加多组定时器 */
+        refreshTimer = setInterval(() => {
+            fetchStatus();
+            refreshDevices();
+            fetchHistory();
+        }, 1000);
     }
+
+    /* 有 sessionStorage 里的会话就直接进主界面，否则停在登录页 */
+    window.addEventListener('DOMContentLoaded', async () => {
+        const ok = await restoreSession();
+        if (!ok) {
+            setMsg('请先登录（默认 admin/admin123）');
+        }
+    });
 </script>
 </body>
 </html>

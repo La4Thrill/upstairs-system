@@ -323,7 +323,12 @@ void db_load_devices_into_runtime(void) {
                                 src ? (const char*)src : "dev", user_id);
         if (idx >= 0) {
             device_set_key(idx, key ? (const char*)key : "");
-            g_devices[idx].gait.cfg.fs = (fs > 1.0f) ? fs : 50.0f;
+
+            /* 恢复设备记录里的采样率：必须走 gait_set_fs()，
+               否则不应期/低通系数还停在默认 50Hz 上（P0-5）。
+               本函数只在 main() 里、设备线程启动之前调用，此处不再额外加锁
+               （避免出现 db_lock → d->mutex 的反向锁序）。 */
+            gait_set_fs(&g_devices[idx].gait, (fs > 1.0f) ? fs : 50.0f);
             g_devices[idx].online = false;
         }
     }

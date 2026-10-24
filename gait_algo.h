@@ -32,15 +32,28 @@
 #define GAIT_EV_STEP15      0x10u  /* 累计每 15 级台阶 */
 #define GAIT_EV_TOP         0x20u  /* 到达最大楼层（99 层） */
 
+/* ---- 与采样率相关的参考值 ----
+ * 这三个量是**物理时间**，由 gait_apply_fs() 按 cfg->fs 换算成样本数/系数。
+ * 参考点 50 Hz 下换算结果与旧硬编码版本逐位一致（α=0.03、15 样本、5 点窗）。
+ */
+#define GAIT_FS_REF             50.0f
+#define GAIT_GRAVITY_ALPHA_REF  0.03f   /* @50Hz */
+#define GAIT_REFRACTORY_S       0.30f   /* 不应期 300 ms */
+#define GAIT_SMOOTH_S           0.10f   /* 滑动平均窗 100 ms（@50Hz = 5 点） */
+
+/* 滑动平均窗最大长度（fs 上限 2000 Hz 时 100 ms = 200 点，这里按 32 点封顶） */
+#define GAIT_WIN_MAX            32
+
 /* ---- 算法配置（可运行时标定） ---- */
 typedef struct {
     float    fs;                 /* 采样率 Hz，数据集为 50 */
     float    acc_lsb_per_g;      /* 加速度灵敏度 LSB/g，LSM9DS0 ±2g = 16384 */
     float    gyro_lsb_per_dps;   /* 角速度灵敏度 LSB/(°/s)，±245dps ≈ 114.3 */
-    float    gravity_alpha;      /* 重力低通系数，0.03 @50Hz ≈ 0.7s 时间常数 */
+    float    gravity_alpha;      /* 重力低通系数（生效值，由 fs 换算；0.03 @50Hz） */
     float    step_thr_g;         /* 台阶判定阈值（动态加速度，g） */
     float    step_hyst_g;        /* 回滞释放阈值（g），须 < step_thr_g */
-    uint16_t refractory;         /* 不应期（样本数），15 @50Hz = 300ms */
+    uint16_t refractory;         /* 不应期（样本数，生效值；15 @50Hz = 300ms） */
+    uint8_t  smooth_len;         /* 滑动平均窗长（样本数，生效值；5 @50Hz = 100ms） */
     float    platform_rms_g;     /* 平台判定：动态加速度 RMS 低于该值 */
     float    platform_dur_s;     /* 平台判定：持续时长（秒） */
     uint16_t steps_per_half;     /* 每半层台阶数（中间平台间隔） */
@@ -55,7 +68,7 @@ typedef struct {
 
     /* 预处理 */
     float    gravity;            /* 重力估计（g） */
-    float    win[5];             /* 滑动平均窗口 */
+    float    win[GAIT_WIN_MAX];  /* 滑动平均窗（实际长度 = cfg.smooth_len） */
     uint8_t  win_i;
     uint8_t  win_n;
     float    energy;             /* 动态能量 EMA（g^2） */
@@ -69,7 +82,8 @@ typedef struct {
     /* 统计输出 */
     uint32_t samples;            /* 已处理样本数（模拟时间 = samples / fs） */
     uint16_t steps;              /* 累计台阶数 */
-    uint16_t half_flights;       /* 累计到达的半层平台数 */
+    uint16_t half_flights;       /* 累计到达的平台数（梯段数，含楼层平台） */
+    uint16_t mid_platforms;      /* 其中真正的「中间平台」（半层，不含楼层平台） */
     uint8_t  climbed;            /* 已上楼数（0..98），楼层 = 1 + climbed */
     uint8_t  floor;              /* 当前楼层（1..99） */
     float    spm;                /* 步频（步/分） */
@@ -80,6 +94,23 @@ typedef struct {
 
 /** 填入默认配置（50Hz / LSM9DS0 / 22 级每层） */
 void gait_default_config(GaitConfig* cfg);
+
+/**
+ * @brief 按 cfg->fs 重算与采样率相关的参数
+ *
+ * 重算 gravity_alpha（参考 0.03 @50Hz）、refractory（300 ms）、
+ * smooth_len（100 ms）。fs 非法（<1 或 >2000）时回退到 50 Hz。
+ * 改 fs 之后必须调用一次，否则不应期/低通系数还停留在旧采样率上。
+ */
+void gait_apply_fs(GaitConfig* cfg);
+
+/**
+ * @brief 运行时切换采样率（不影响计数）
+ *
+ * 调 gait_apply_fs()；若滑动平均窗长发生变化，顺带清空窗口
+ * （新旧窗长的样本混在一起会得到一个既不是旧窗也不是新窗的中间值）。
+ */
+void gait_set_fs(GaitState* st, float fs);
 
 /** 初始化（含重置） */
 void gait_init(GaitState* st, const GaitConfig* cfg);

@@ -23,6 +23,9 @@
 | 会话 | 只在内存，重启全掉线 | **持久化到数据库**，重启不掉线，支持登出 |
 | 原始数据 | 表建了没用、无限增长 | **批量入库 + 保留策略**（按天 + 按行数清理） |
 | 陀螺 | 默认"能用" | **有效性自检**：`gyro_check` 工具 + 状态上报 + 页面标识 |
+| 采样率 | 不应期写死 15 样本 | **随 `fs` 换算**（300 ms / 0.03 低通 / 100 ms 窗），40/100 Hz 端侧也不会漏检或重复计数 |
+| 中间平台 | 页面显示"6 个"（把楼层平台也算进去） | **分开了**：`mid_platforms` 是真正的半层平台（3 个），`half_flights` 是梯段总数（6 个） |
+| 线程安全 | 切场景时可能崩 | **终端级锁 + 设备锁**：运行中"加载文件/重置"不再与读文件线程抢 `FILE*` |
 
 ---
 
@@ -39,7 +42,7 @@
 │ WiFi + LSM9DS0     │    │                               │   │ 角色登录             │
 └────────────────────┘    │ gait_algo（算法，可移植）       │   └────────────────────┘
                           │ audio_hint（事件→音色）         │
-                          │ SQLite：6 张表                  │
+                          │ SQLite：7 张表                  │
                           └───────────────────────────────┘
 ```
 
@@ -66,16 +69,21 @@
 加速度模长 |a| (g)
   │  ②去重力：一阶低通 α=0.03（@50Hz ≈0.7s），dyn = |a| − 重力
   ▼
-动态加速度 dyn ──③5 点滑动平均
-  │  ④台阶检测：迟滞 0.18g / 0.09g + 不应期 15 样本(300ms)
+动态加速度 dyn ──③滑动平均（窗长按 fs 换算，@50Hz = 5 点 / 100 ms）
+  │  ④台阶检测：迟滞 0.18g / 0.09g + 不应期 300 ms（按 fs 换算成样本数）
   ▼
-台阶事件 ──►⑤台阶数 mod 11 → 中间平台(梯段)事件
-        ──► 台阶数 mod 22 → 到达楼层事件
-        ──► 台阶数 mod 15 → "每跳 15 梯"提示
+台阶事件 ──►⑤台阶数 mod 11 → 平台（梯段）事件
+        ──►  台阶数 mod 22 → 到达楼层事件
+        ──►  台阶数 mod 15 → "每 15 级"提示（旧模板遗留，见 §11）
   │  ⑥动态能量 EMA：RMS<0.14g 持续 0.6s → 平台(真停顿)事件
   ▼
 事件 → 提示音（音色区分）+ /api/status + SQLite
 ```
+
+> **采样率无关（P0-5）**：`refractory`（300 ms）、`gravity_alpha`（0.03 @50Hz）、滑动平均窗（100 ms）
+> 这三个量存的是**物理时间**，由 `gait_apply_fs()` 按 `cfg->fs` 换算成样本数/系数。
+> `fs == 50` 时换算结果与旧硬编码版本逐位一致，所以数据集上的结论（68 级 / 3 层 / 82 级·分⁻¹）不变。
+> 端侧定时器改成 40 Hz 或 100 Hz 也不用改算法，只要报文里的 `fs` 是对的。
 
 ### 3.3 参数标定依据
 
@@ -140,7 +148,7 @@ X-Device-Key: <首次上报时下发>
 | `POST /api/login` | 返回 `token`、`role`、`user_id`；后续请求带 `X-Auth-Token` |
 | `GET /api/session` | 当前会话 |
 | `GET /api/devices` | 设备列表（admin/monitor 全部；user 只有自己的） |
-| `GET /api/status?device_id=` | 单设备实时状态 + 三条波形（accel/gyro/dyn） |
+| `GET /api/status?device_id=` | 单设备实时状态 + 三条波形（accel/gyro/dyn）；含 `mid_platforms`（真正的半层平台）与 `half_flights`（梯段总数） |
 | `GET /api/history?device_id=&limit=` | 进度快照（时间/楼层/已爬/台阶/步频） |
 | `GET /api/samples?device_id=&limit=` | 原始样本回看（`raw_samples` 表） |
 | `POST /api/ingest` | 设备上报（`X-Device-Key` 鉴权） |
@@ -210,7 +218,7 @@ POST /api/maintenance/retention
 
 ```powershell
 gcc -std=c99 -O2 -o gyro_check.exe tools\gyro_check.c -lm
-.\gyro_check.exe "E:\数据文件\数据文件\九轴数据文件\上三层楼数据.txt"
+.\gyro_check.exe "D:\数据文件\数据文件\九轴数据文件\上三层楼数据.txt"
 ```
 
 对数据集的输出：
@@ -277,16 +285,26 @@ gcc -std=c99 -O2 -o server.exe server.c globals.c web_server.c simulator.c gait_
 
 ```powershell
 gcc -std=c99 -O2 -o algo_check.exe tools\algo_check.c gait_algo.c -lm
-.\algo_check.exe "E:\数据文件\数据文件\九轴数据文件\上三层楼数据.txt" 1 0.18
+.\algo_check.exe "D:\数据文件\数据文件\九轴数据文件\上三层楼数据.txt" 1 0.18
 ```
 
 ```
-  [  20.9s] FLOOR     floor=2  steps=22  |a|=1.20g dyn=0.31g
+  [   5.7s] HALF      (梯段 1)  steps=11
+  [  15.9s] FLOOR     floor=2  steps=22  |a|=1.49g dyn=0.18g
+  [  23.0s] HALF      (梯段 3)  steps=33
+  [  30.7s] FLOOR     floor=3  steps=44  |a|=1.72g dyn=0.23g
+  [  38.5s] HALF      (梯段 5)  steps=55
   [  42.2s] PAUSE     平台停顿 steps=59
+  [  46.8s] FLOOR     floor=4  steps=66  |a|=1.43g dyn=0.22g
 samples   : 2488  (49.8s @ 50Hz)
 steps     : 68   (平均 82.0 级/分)
+half      : 6 个梯段（其中中间平台 3 个，不含楼层平台）
 floor     : 已上楼 3 层，当前 4 层（每层 22 级）
 ```
+
+> 注意 `HALF` 只打印在"纯中间平台"那一次；台阶数 22 / 44 / 66 的平台上同时有 `FLOOR`，
+> 工具按到层打印，所以看到的是梯段 1 / 3 / 5 而不是 1~6。
+> 这组数字是用当前代码（P0-3~P0-6 修复后）重新跑出来的，可以直接贴进设计报告的"测试记录"。
 
 参数：`<数据文件> [1/0 是否判层] [步态阈值，可选]`。
 
@@ -294,28 +312,74 @@ floor     : 已上楼 3 层，当前 4 层（每层 22 级）
 
 ```powershell
 gcc -std=c99 -O2 -o selftest.exe tools\selftest.c crypto_sha256.c gait_algo.c -lm
-.\selftest.exe "E:\数据文件\数据文件\九轴数据文件\上三层楼数据.txt"
+.\selftest.exe "D:\数据文件\数据文件\九轴数据文件\上三层楼数据.txt"
 ```
 
-覆盖 16 项：SHA-256 三个标准向量、口令加盐哈希（正确/错误口令、盐随机性、明文兼容）、
-步态算法（68 级台阶 / 已上楼 3 层 / 6 个梯段）。实测 `16 通过, 0 失败`。
+覆盖 17 项：SHA-256 三个标准向量、口令加盐哈希（正确/错误口令、盐随机性、明文兼容）、
+步态算法（68 级台阶 / 已上楼 3 层 / 6 个梯段 / 3 个真正的中间平台）。实测 `17 通过, 0 失败`。
 
 ### 10.3 陀螺验证
 
 见第 8 节 `tools/gyro_check.c`。
 
+### 10.4 多数据集回归（含负样本）—— 直接验收"会不会误判楼层"
+
+只看"上三层楼能判出 3 层"是不够的：那只证明算法在这一份数据上对。
+真正要回答的是"**换一份别的运动数据，会不会也判出楼层**"。
+
+仓库里的 `testdata/` 放了老师给的其余 5 份数据（下楼 / 跑步 / 跳绳 / 仰卧起坐 / 混合），
+`data1.txt`、`data2.txt` 就是上三层楼和日常行走，合起来 7 份：
+
+```powershell
+gcc -std=c99 -O2 -o regress.exe tools\regress.c gait_algo.c -lm
+.\regress.exe testdata\expect.txt
+.\regress.exe testdata\expect.txt --strict   # 有一条不符就返回 1，可挂 CI
+```
+
+输出是一张表（数据集 / 时长 / 台阶 / 已爬层 / 中间平台 / 期望 / PASS-FAIL）。
+**现在 `--strict` 会在后 6 条上报 FAIL** —— 这正是 README §11 第 1 条那个已知限制的量化结果，
+也是 P0-1（状态机）做完之后必须变绿的那组验收条件。
+
+### 10.5 `/api/ingest` 回放：硬件接上之前的端到端验证
+
+`tools/replay_ingest.py` 用 Python 标准库把整份 txt 按 50 Hz 打成 JSON 批量打到 `/api/ingest`，
+**它模拟的正是 STM32 该做的事**：50 Hz 采样、每 100 个样本一个报文、带 `X-Device-Key`。
+
+```powershell
+# 先起 server.exe，再另开一个窗口
+python tools\replay_ingest.py "D:\数据文件\数据文件\九轴数据文件\上三层楼数据.txt" `
+       --device STM32-01 --user collector1
+```
+
+跑完最后会打印"已爬 3 层 / 68 级台阶 / floor 事件 3 次"。
+**对不上就说明协议或换算有问题，在硬件阶段之前就能发现**，不用等板子焊好。
+
+参数：`--fs`（默认 50）、`--batch`（默认 100）、`--speed`（回放倍速）、`--loop`（重复次数）、
+`--dry-run`（只解析不发）。
+
 ---
 
 ## 11. 已知限制 / 下一步
 
-1. **陀螺数据不可用**：数据集三轴角速度标准差 < 0.1 °/s，现在只用了加速度，方向判别做不了。
+1. **没有"是否在爬楼"的判据（最重要）**：现在只要动态加速度超过阈值就记一级台阶，
+   楼层 = 累计台阶 ÷ 22。把老师给的其它数据也喂进来会误报：
+   下三层楼 → 3 层、日常行走 60 s → 2 层、跑步 → 7 层、跳绳 → 4 层、混合 → 8 层。
+   也就是说**平地走 / 下楼也会涨楼层**，而且误差会累加、只能靠"重置"清掉。
+   题目发挥要求里的"非爬楼期间提示音 2"也需要这个判别能力。
+   修复方向：状态机（IDLE → CLIMBING → LANDING）+ 用"到层平台"驱动楼层计数，
+   真机陀螺有效后再加"竖直位移积分"做方向判别。**这一步留到硬件阶段做。**
+2. **每层 22 级是标定值，不是通用值**：扫描下来 16 级/层会判 4 层、23 级/层会判 2 层。
+   建议改成用最近若干层的实测级数做自适应（中位数）。
+3. **陀螺数据不可用**：数据集三轴角速度标准差 < 0.1 °/s，现在只用了加速度，方向判别做不了。
    硬件阶段先用 `gyro_check.exe` 验证（见第 8 节），确认有响应后再补方向判别。
-2. **口令哈希是"快哈希"**：SHA-256 加盐抗暴力破解能力有限，生产应换 PBKDF2/Argon2；
+4. **`steps15`（每 15 级提示）是别的题目的遗留**：本课题要求是"每级楼梯一声"，
+   这个事件和对应的提示音建议删掉，别写进报告当成本题要求。
+5. **口令哈希是"快哈希"**：SHA-256 加盐抗暴力破解能力有限，生产应换 PBKDF2/Argon2；
    另外还没有注册/改密接口。
-3. **没有用户管理界面**：新增采集对象要直接改 `users` 表。
-4. **`raw_samples` 按"行数 + 天数"清理**，不做降采样归档；长期多设备运行建议再加按小时聚合。
-5. **`sqlite3.c` 仍在仓库里**（9.4 MB）：为了让 `gcc 一行命令` 就能编，先留着；换 vcpkg/系统库后可以删。
-6. 模拟终端的"文件缺失/格式错"只会静默停止，页面上没有明确报错。
+6. **没有用户管理界面**：新增采集对象要直接改 `users` 表。
+7. **`raw_samples` 按"行数 + 天数"清理**，不做降采样归档；长期多设备运行建议再加按小时聚合。
+8. **`sqlite3.c` 仍在仓库里**（9.4 MB）：为了让 `gcc 一行命令` 就能编，先留着；换 vcpkg/系统库后可以删。
+9. 模拟终端的"文件缺失/格式错"只会静默停止，页面上没有明确报错。
 
 ---
 
@@ -335,6 +399,48 @@ gcc -std=c99 -O2 -o selftest.exe tools\selftest.c crypto_sha256.c gait_algo.c -l
 | `index.html` / `terminal.html` | 监控页（设备列表/切换/陀螺状态）/ 模拟端独立页 |
 | `tools/algo_check.c` | 算法回归与参数标定工具 |
 | `tools/gyro_check.c` | **陀螺有效性验证**（文件/stdin，可用于串口实时验证） |
-| `tools/selftest.c` | 自检：SHA-256 向量 + 口令哈希 + 步态算法（16 项） |
-| `docs/hardware-protocol.md` | **硬件对接协议**（STM32/ESP8266） |
+| `tools/selftest.c` | 自检：SHA-256 向量 + 口令哈希 + 步态算法（17 项） |
+| `tools/regress.c` | **多数据集回归（含负样本）**：`regress testdata/expect.txt --strict` |
+| `tools/replay_ingest.py` | **`/api/ingest` 回放**：按 50 Hz 把 txt 打进服务端，硬件前的端到端验证 |
+| `testdata/` | 老师给的负样本数据 + `expect.txt` 期望值清单 |
+| `docs/hardware-protocol.md` | **硬件对接协议**（STM32/ESP8266）+ LSM9DS0 配置对照 |
+
+---
+
+## 13. 本轮修复记录（P0-3 ~ P0-6）
+
+只修 bug，**不改算法判据**，所以数据集上的结论（68 级 / 3 层 / 82.0 级·分⁻¹）不变。
+
+| 编号 | 问题 | 改法 | 影响文件 |
+|---|---|---|---|
+| P0-3 | 终端线程在 `fgets(t->fp)` 时，HTTP 线程可能在 `/api/sim/load`、`/reset` 里 `fclose(t->fp)` → use-after-free（"边跑边切场景"会崩） | 每个 `SimTerminal` 加一把锁；`term_read`/`term_apply_profile`/`sim_reset`/`sim_start`/`sim_set_data_files` 全部持锁；`fclose` 只在持锁时做 | `simulator.c` |
+| P0-4 | 模拟端和 `/api/ingest` 都在**不持 `d->mutex`** 时调 `gait_feed()`；`d->gait.cfg.fs = fs` 裸写；快照参数在解锁后才读 `d` | 算法调用 + 状态回填 + 事件处理整段放进设备锁；快照参数在锁内取局部变量；落库放到锁外 | `simulator.c`、`web_server.c` |
+| P0-5 | `refractory = 15` 是固定样本数，但 `fs` 允许 1~1000 变 → 端侧 40/100 Hz 时 300 ms 不应期失效 | 新增 `gait_apply_fs()` / `gait_set_fs()`：不应期 300 ms、低通 0.03、滑动平均 100 ms 都按 `fs` 换算；`fs == 50` 时结果与旧版逐位一致；改 `fs` 时窗口长度变化会清空窗口 | `gait_algo.c/h`、`web_server.c`、`db_manager.c` |
+| P0-6 | `else if` 链把同一样本上并发的事件（HALF / PAUSE / STEP15）吞掉；`half_flights` 把楼层平台也算进"中间平台"，上 3 层楼页面显示 6 个 | 到层/中间平台保持互斥但其余事件独立处理；新增 `mid_platforms`（真正的半层平台），`half_flights` 明确为"梯段总数"；页面拆成两项显示 | `gait_algo.c/h`、`globals.c`、`global_vars.h`、`simulator.c`、`web_server.c`、`index.html`、`terminal.html`、`tools/*` |
+
+**回归验证（`fs` 无关性，上三层楼数据）**：
+
+| fs | refractory | smooth_len | α | 检出 | 判层 | 中间平台 |
+|---|---|---|---|---|---|---|
+| 50 Hz（原始） | 15 | 5 | 0.0300 | **68** | **3 层** | 3 |
+| 100 Hz（2× 插值） | 30 | 10 | 0.0150 | 72 | **3 层** | 3 |
+| 25 Hz（2× 抽取） | 8 | 3 | 0.0600 | 66 | **3 层** | 3 |
+
+> 台阶数在 66~72 之间浮动是重采样本身的平滑/信息损失造成的，**判层数完全一致**，
+> 说明"随 fs 换算"这一层是对的。修好之前，40 Hz 跑同一份数据会明显少计（不应期相当于 375 ms）。
+
+`tools/selftest.c` 现在断言 17 项（新增"真正的中间平台 3 个"）。
+
+## 14. 本轮一并修掉的 P1（不影响算法结论）
+
+| 编号 | 问题 | 改法 |
+|---|---|---|
+| P1-2 | `/api/devices` 给每台设备都带 3 条 256 点波形（约 10 KB/台），前端每 3 s 轮询一次，16 台设备就是 ~160 KB/次 | `device_status_json()` 加 `with_waves` 参数，**列表不带波形**，波形只在 `/api/status` 取 |
+| P1-3 | `audio_hint` 的 `g_last_text` 是全局单例，两台终端并发时 `d->last_hint` 会串台 | 新增纯函数 `audio_hint_text(HintId)`，按 id 取固定名字，不再读全局状态 |
+| P1-4 | 前端用 `innerHTML` 直接拼 `device_id` / `name` / `username` → 存储型 XSS（`/api/ingest` 的 `name` 是外部可写的） | 两个页面都加 `esc()`，所有插入点统一转义；`onclick` 里的参数也单独转义 |
+| P1-5 | 登录态只存在 JS 变量里，刷新页面就掉线（答辩演示时每次都要重登） | token 存 `sessionStorage`，页面加载时用 `/api/session` 校验并自动恢复；登出时清掉 |
+| P1-7 | 统一要求里的"发送数据计数 / 工作时间计时"界面上没有 | `/api/status` 新增 `samples` 与 `work_seconds`（= 样本数 / fs，跨设备跨 fs 都能对齐），两个页面都显示"发送样本数 + 工作时间 mm:ss" |
+| P1-8 | README 示例输出与当前代码不符（`[20.9s] FLOOR steps=22`，实际是 15.9 s）；§2 写"6 张表"实际 7 张 | 已重新生成示例输出、改正表数 |
+| P1-9 | 没有负样本回归 | 新增 `testdata/` + `tools/regress.c`，把 7 份数据一起跑，`--strict` 直接当验收脚本 |
+| P1-10 | 只能用手写 `curl` 发 2 个样本验证 ingest | 新增 `tools/replay_ingest.py`，整份数据按 50 Hz 打进 `/api/ingest` |
 

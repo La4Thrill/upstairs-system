@@ -412,7 +412,14 @@ static void add_wave_array(cJSON* root, const char* key, const float* buffer, in
     cJSON_AddItemToObject(root, key, arr);
 }
 
-static void device_status_json(cJSON* root, int idx) {
+/**
+ * @brief 单设备状态 JSON
+ *
+ * @param with_waves false = 不带三条波形（用于 /api/devices 列表）。
+ *        每台设备的波形是 3×256 个浮点、约 10 KB，前端每 3 s 轮询一次设备列表时
+ *        16 台设备就是 ~160 KB/次，纯属浪费；波形只在 /api/status 里取。
+ */
+static void device_status_json(cJSON* root, int idx, bool with_waves) {
     Device* d = &g_devices[idx];
 
     pthread_mutex_lock(&d->mutex);
@@ -442,9 +449,18 @@ static void device_status_json(cJSON* root, int idx) {
     cJSON_AddNumberToObject(root, "steps", d->total_steps);
     cJSON_AddNumberToObject(root, "speed", d->speed_per_minute);
     cJSON_AddNumberToObject(root, "half_flights", d->half_flights);
+    cJSON_AddNumberToObject(root, "mid_platforms", d->mid_platforms);
     cJSON_AddBoolToObject(root, "on_platform", d->on_platform);
     cJSON_AddNumberToObject(root, "file_lines", d->sent_lines);
     cJSON_AddNumberToObject(root, "samples_total", (double)d->samples_total);
+
+    /* 课题统一要求里的"发送数据计数 + 工作时间计时"：
+       samples 是本次已处理的样本数，work_seconds 是按 fs 换算出的采集时长
+       （用样本数/fs 而不是墙钟差，跨设备、跨 fs 都能对齐）。 */
+    cJSON_AddNumberToObject(root, "samples", (double)d->gait.samples);
+    cJSON_AddNumberToObject(root, "work_seconds",
+                            d->gait.cfg.fs > 0.1f ? (double)d->gait.samples / d->gait.cfg.fs : 0.0);
+
     cJSON_AddNumberToObject(root, "last_event_time", d->last_event_time);
     cJSON_AddStringToObject(root, "last_event", last_event);
     cJSON_AddStringToObject(root, "last_hint", last_hint);
@@ -456,9 +472,11 @@ static void device_status_json(cJSON* root, int idx) {
     cJSON_AddBoolToObject(root, "gyro_valid", d->gyro_valid);
     cJSON_AddNumberToObject(root, "gyro_samples", (double)d->gyro_n);
 
-    add_wave_array(root, "accel_wave", d->accel_buffer, d->buffer_index);
-    add_wave_array(root, "gyro_wave", d->gyro_buffer, d->buffer_index);
-    add_wave_array(root, "dyn_wave", d->dyn_buffer, d->buffer_index);
+    if (with_waves) {
+        add_wave_array(root, "accel_wave", d->accel_buffer, d->buffer_index);
+        add_wave_array(root, "gyro_wave", d->gyro_buffer, d->buffer_index);
+        add_wave_array(root, "dyn_wave", d->dyn_buffer, d->buffer_index);
+    }
     pthread_mutex_unlock(&d->mutex);
 
     cJSON_AddNumberToObject(root, "max_floors", g_max_floors);
@@ -556,7 +574,6 @@ static void handle_ingest(int client_sock, const char* req_body, const char* dev
     if (fs < 1.0f || fs > 1000.0f) {
         fs = 50.0f;
     }
-    d->gait.cfg.fs = fs;
 
     int n = cJSON_GetArraySize(j_samples);
     if (n > MAX_INGEST_SAMPLES) {
@@ -574,6 +591,19 @@ static void handle_ingest(int client_sock, const char* req_body, const char* dev
 
     uint32_t ev_total = 0;
     int accepted = 0;
+    int floor_now = 0, climbed_now = 0, steps_now = 0;
+    float spm_now = 0.0f;
+    long long samples_now = 0;
+
+    /* P0-4：整段"改 fs + 跑算法 + 写波形 + 回填计数"都必须在设备锁内。
+       旧版 gait_feed() 是在锁外调的，而 /api/status 是持锁读 d->gait.cfg 的，
+       同一设备并发上报（网络重传）时算法状态会被搅乱。 */
+    pthread_mutex_lock(&d->mutex);
+
+    /* P0-5：改采样率必须同时重算 不应期 / 重力低通 / 滑动平均窗长。
+       旧版只写 cfg.fs，端侧若按 40Hz 或 100Hz 上报，300ms 不应期就失效了。 */
+    gait_set_fs(&d->gait, fs);
+    fs = d->gait.cfg.fs;
 
     for (int i = 0; i < n; ++i) {
         const cJSON* row = cJSON_GetArrayItem(j_samples, i);
@@ -595,19 +625,14 @@ static void handle_ingest(int client_sock, const char* req_body, const char* dev
                                 &accel_g, &gyro_dps, &dyn_g);
         ev_total |= ev;
 
-        pthread_mutex_lock(&d->mutex);
         d->accel_buffer[d->buffer_index] = accel_g;
         d->gyro_buffer[d->buffer_index] = gyro_dps;
         d->dyn_buffer[d->buffer_index] = dyn_g;
         d->buffer_index = (d->buffer_index + 1) % DATA_BUFFER_SIZE;
         device_note_gyro_locked(d, gyro_dps);   /* 陀螺有效性自检 */
-        pthread_mutex_unlock(&d->mutex);
     }
 
     if (accepted > 0) {
-        db_insert_raw_batch(device_id, (double)time(NULL), 1.0 / fs, buf, accepted);
-
-        pthread_mutex_lock(&d->mutex);
         d->samples_total += accepted;
         d->sent_lines = (int)d->samples_total;
         d->total_steps = (int)d->gait.steps;
@@ -615,12 +640,14 @@ static void handle_ingest(int client_sock, const char* req_body, const char* dev
         d->climbed_floors = (int)d->gait.climbed;
         d->speed_per_minute = d->gait.spm;
         d->half_flights = (int)d->gait.half_flights;
+        d->mid_platforms = (int)d->gait.mid_platforms;
         d->on_platform = d->gait.on_platform;
         d->last_seen = time(NULL);
         d->online = true;
         d->running = true;
         d->last_event_time = d->gait.last_event_t;
 
+        /* P0-6：到层 / 中间平台互斥，其余事件不再被 return 吞掉 */
         if (ev_total & GAIT_EV_FLOOR) {
             snprintf(d->last_event, sizeof(d->last_event), "到达 %d 层（%d 级台阶）",
                      d->current_floor, d->total_steps);
@@ -628,19 +655,37 @@ static void handle_ingest(int client_sock, const char* req_body, const char* dev
         } else if (ev_total & GAIT_EV_HALF) {
             snprintf(d->last_event, sizeof(d->last_event), "中间平台（第 %d 个梯段）", d->half_flights);
             db_insert_floor_event(device_id, "half", d->current_floor, d->climbed_floors, d->total_steps);
-        } else if (ev_total & GAIT_EV_PAUSE) {
+        }
+        if (ev_total & GAIT_EV_TOP) {
+            snprintf(d->last_event, sizeof(d->last_event), "已到 %d 层上限", g_max_floors);
+            db_insert_floor_event(device_id, "top", d->current_floor, d->climbed_floors, d->total_steps);
+        }
+        if ((ev_total & GAIT_EV_PAUSE) && !(ev_total & (GAIT_EV_FLOOR | GAIT_EV_HALF))) {
             snprintf(d->last_event, sizeof(d->last_event), "平台停顿");
-        } else if (ev_total & GAIT_EV_STEP15) {
+        }
+        if ((ev_total & GAIT_EV_STEP15) && !(ev_total & (GAIT_EV_FLOOR | GAIT_EV_HALF | GAIT_EV_PAUSE))) {
             snprintf(d->last_event, sizeof(d->last_event), "已走 %d 级台阶", d->total_steps);
         }
-        pthread_mutex_unlock(&d->mutex);
+    }
 
-        db_update_device_seen(device_id, (long long)d->samples_total);
+    /* 响应里要用到的值统一在锁内取好，解锁后不再读 d */
+    floor_now = d->current_floor;
+    climbed_now = d->climbed_floors;
+    steps_now = d->total_steps;
+    spm_now = d->speed_per_minute;
+    samples_now = d->samples_total;
+    int half_now = d->half_flights;
+
+    pthread_mutex_unlock(&d->mutex);
+
+    /* 落库放到锁外（别在设备锁里跑 SQL 事务） */
+    if (accepted > 0) {
+        db_insert_raw_batch(device_id, (double)time(NULL), 1.0 / fs, buf, accepted);
+        db_update_device_seen(device_id, samples_now);
+        db_insert_snapshot(device_id, floor_now, climbed_now, steps_now, spm_now);
     }
 
     free(buf);
-
-    db_insert_snapshot(device_id, d->current_floor, d->climbed_floors, d->total_steps, d->speed_per_minute);
 
     /* 响应：设备侧可据此驱动蜂鸣器/LED（提示音在端侧响，不在服务器） */
     cJSON_AddStringToObject(root, "status", "ok");
@@ -659,11 +704,11 @@ static void handle_ingest(int client_sock, const char* req_body, const char* dev
     if (ev_total & GAIT_EV_TOP) cJSON_AddItemToArray(events, cJSON_CreateString("top"));
     cJSON_AddItemToObject(root, "events", events);
 
-    cJSON_AddNumberToObject(root, "current_floor", d->current_floor);
-    cJSON_AddNumberToObject(root, "climbed_floors", d->climbed_floors);
-    cJSON_AddNumberToObject(root, "steps", d->total_steps);
-    cJSON_AddNumberToObject(root, "speed", d->speed_per_minute);
-    cJSON_AddNumberToObject(root, "half_flights", d->half_flights);
+    cJSON_AddNumberToObject(root, "current_floor", floor_now);
+    cJSON_AddNumberToObject(root, "climbed_floors", climbed_now);
+    cJSON_AddNumberToObject(root, "steps", steps_now);
+    cJSON_AddNumberToObject(root, "speed", spm_now);
+    cJSON_AddNumberToObject(root, "half_flights", half_now);
 
     send_json_response(client_sock, "200 OK", root);
     cJSON_Delete(root);
@@ -720,7 +765,7 @@ static void handle_get(int client_sock, const char* path, const char* query, con
             }
             cJSON* o = cJSON_CreateObject();
             cJSON_AddNumberToObject(o, "index", i);
-            device_status_json(o, i);
+            device_status_json(o, i, false);   /* 列表不带波形，省流量 */
             cJSON_AddItemToArray(arr, o);
         }
 
@@ -751,7 +796,7 @@ static void handle_get(int client_sock, const char* path, const char* query, con
         }
 
         cJSON* root = cJSON_CreateObject();
-        device_status_json(root, idx);
+        device_status_json(root, idx, true);   /* 实时页要波形 */
         cJSON_AddBoolToObject(root, "sim_running", sim_is_running());
         send_json_response(client_sock, "200 OK", root);
         cJSON_Delete(root);

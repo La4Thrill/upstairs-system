@@ -60,7 +60,8 @@ typedef struct {
     int       climbed_floors;           // 已上楼数（0..98）
     int       total_steps;              // 总台阶数
     float     speed_per_minute;         // 步频 (级/分钟)
-    int       half_flights;             // 已到达的中间平台数
+    int       half_flights;             // 已到达的平台数（梯段数，含楼层平台）
+    int       mid_platforms;            // 其中真正的中间平台（半层，不含楼层平台）
     bool      on_platform;              // 当前是否停在平台
 
     int       buffer_index;             // 环形缓冲区索引

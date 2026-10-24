@@ -88,13 +88,13 @@ selftest        ← 自检（SHA-256 / 口令 / 步态）
 
 ```powershell
 # 自检（16 项断言，不依赖服务端）
-.\cmake-build-debug\selftest.exe "E:\数据文件\数据文件\九轴数据文件\上三层楼数据.txt"
+.\cmake-build-debug\selftest.exe "D:\数据文件\数据文件\九轴数据文件\上三层楼数据.txt"
 
 # 算法回归（参数：文件 是否判层 阈值）
-.\cmake-build-debug\algo_check.exe "E:\数据文件\数据文件\九轴数据文件\上三层楼数据.txt" 1 0.18
+.\cmake-build-debug\algo_check.exe "D:\数据文件\数据文件\九轴数据文件\上三层楼数据.txt" 1 0.18
 
 # 陀螺验证
-.\cmake-build-debug\gyro_check.exe "E:\数据文件\数据文件\九轴数据文件\上三层楼数据.txt"
+.\cmake-build-debug\gyro_check.exe "D:\数据文件\数据文件\九轴数据文件\上三层楼数据.txt"
 ```
 
 （把 `cmake-build-debug` 换成你实际的构建目录名，Release 配置下是 `cmake-build-release`。）
@@ -106,7 +106,7 @@ selftest        ← 自检（SHA-256 / 口令 / 步态）
 3. **Program arguments** 填数据文件路径（**用引号括起来**，路径里有中文和空格）：
 
 ```
-"E:\数据文件\数据文件\九轴数据文件\上三层楼数据.txt"
+"D:\数据文件\数据文件\九轴数据文件\上三层楼数据.txt"
 ```
 
 4. 保存运行即可，输出在 Run 窗口。

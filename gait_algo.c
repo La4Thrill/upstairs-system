@@ -9,6 +9,13 @@
  *          → 检出 68 级台阶（阈值 0.15~0.22g 区间为 61~72 级）
  *    楼层：68 级 / 3 层 ≈ 22.7 级每层，取 22（与住宅 18~22 级/层吻合）
  *          → 68/22 = 3 层
+ *
+ *  采样率无关性（P0-5）：
+ *    「不应期 300ms / 重力低通 0.03 / 滑动平均 100ms」这三个量本来是
+ *    按 50Hz 硬编码成样本数的。真机端定时器一旦不是 50Hz（40Hz、100Hz 都很常见），
+ *    它们代表的物理时间就跟着变，会直接导致漏检或重复计数。
+ *    现在改为存物理时间（GAIT_REFRACTORY_S / GAIT_GRAVITY_ALPHA_REF / GAIT_SMOOTH_S），
+ *    由 gait_apply_fs() 按 cfg->fs 换算；fs == 50 时换算结果与旧版本逐位一致。
  * ============================================================
  */
 
@@ -16,6 +23,74 @@
 #include <math.h>
 
 #define GAIT_ENERGY_ALPHA 0.05f   /* 动态能量 EMA 系数，@50Hz ≈ 0.4s */
+
+/* 采样率合法范围：超出就回退到参考值，避免除零/窗口越界 */
+#define GAIT_FS_MIN 1.0f
+#define GAIT_FS_MAX 2000.0f
+
+static float gait_sane_fs(float fs) {
+    if (!(fs >= GAIT_FS_MIN) || fs > GAIT_FS_MAX) {
+        return GAIT_FS_REF;
+    }
+    return fs;
+}
+
+void gait_apply_fs(GaitConfig* cfg) {
+    if (!cfg) {
+        return;
+    }
+
+    float fs = gait_sane_fs(cfg->fs);
+    cfg->fs = fs;
+
+    /* 重力低通：参考 0.03 @50Hz。按 fs 线性缩放（小 α 下与 1-(1-α)^(fs/50) 等价），
+       fs == 50 时 0.03 * (50/50) == 0.03f，与旧实现逐位一致。 */
+    float alpha = GAIT_GRAVITY_ALPHA_REF * (GAIT_FS_REF / fs);
+    if (alpha >= 1.0f) {
+        alpha = 1.0f;
+    }
+    cfg->gravity_alpha = alpha;
+
+    /* 不应期 300 ms（四舍五入到样本数，@50Hz = 15） */
+    float refr = GAIT_REFRACTORY_S * fs + 0.5f;
+    if (refr < 1.0f) {
+        refr = 1.0f;
+    }
+    if (refr > 60000.0f) {
+        refr = 60000.0f;
+    }
+    cfg->refractory = (uint16_t)refr;
+
+    /* 滑动平均窗 100 ms（四舍五入，@50Hz = 5；上限 GAIT_WIN_MAX） */
+    float wl = GAIT_SMOOTH_S * fs + 0.5f;
+    if (wl < 1.0f) {
+        wl = 1.0f;
+    }
+    if (wl > (float)GAIT_WIN_MAX) {
+        wl = (float)GAIT_WIN_MAX;
+    }
+    cfg->smooth_len = (uint8_t)wl;
+}
+
+void gait_set_fs(GaitState* st, float fs) {
+    if (!st) {
+        return;
+    }
+
+    uint8_t old_len = st->cfg.smooth_len;
+    st->cfg.fs = fs;
+    gait_apply_fs(&st->cfg);
+
+    /* 窗长变了就把窗口清空：新旧长度的样本混在一起算平均会得到一个
+       既不是旧窗也不是新窗的中间值。计数状态不动。 */
+    if (st->cfg.smooth_len != old_len) {
+        st->win_i = 0;
+        st->win_n = 0;
+        for (int i = 0; i < GAIT_WIN_MAX; ++i) {
+            st->win[i] = 0.0f;
+        }
+    }
+}
 
 void gait_default_config(GaitConfig* cfg) {
     if (!cfg) {
@@ -25,21 +100,22 @@ void gait_default_config(GaitConfig* cfg) {
     cfg->fs = 50.0f;                 /* 数据集标称采样率 */
     cfg->acc_lsb_per_g = 16384.0f;   /* LSM9DS0 ±2g：0.061 mg/LSB */
     cfg->gyro_lsb_per_dps = 114.285f;/* LSM9DS0 ±245dps：8.75 mdps/LSB */
-    cfg->gravity_alpha = 0.03f;
     cfg->step_thr_g = 0.18f;
     cfg->step_hyst_g = 0.09f;
-    cfg->refractory = 15;
     cfg->platform_rms_g = 0.14f;
     cfg->platform_dur_s = 0.6f;
     cfg->steps_per_half = 11;
     cfg->steps_per_floor = 22;
     cfg->max_floors = 99;
     cfg->count_floors = true;
+
+    /* 与 fs 相关的三项（gravity_alpha / refractory / smooth_len）由这里统一填 */
+    gait_apply_fs(cfg);
 }
 
 static void gait_clear_counts(GaitState* st) {
     st->gravity = 0.0f;
-    for (int i = 0; i < 5; ++i) {
+    for (int i = 0; i < GAIT_WIN_MAX; ++i) {
         st->win[i] = 0.0f;
     }
     st->win_i = 0;
@@ -52,6 +128,7 @@ static void gait_clear_counts(GaitState* st) {
     st->samples = 0;
     st->steps = 0;
     st->half_flights = 0;
+    st->mid_platforms = 0;
     st->climbed = 0;
     st->floor = 1;
     st->spm = 0.0f;
@@ -125,10 +202,11 @@ uint32_t gait_feed(GaitState* st,
     }
     float dyn = mag - st->gravity;
 
-    /* ---------- 3. 5 点滑动平均 ---------- */
+    /* ---------- 3. 滑动平均（窗长由 fs 换算，@50Hz = 5 点） ---------- */
+    uint8_t wl = cfg->smooth_len ? cfg->smooth_len : 1u;
     st->win[st->win_i] = dyn;
-    st->win_i = (uint8_t)((st->win_i + 1u) % 5u);
-    if (st->win_n < 5u) {
+    st->win_i = (uint8_t)((st->win_i + 1u) % wl);
+    if (st->win_n < wl) {
         st->win_n++;
     }
     float f = 0.0f;
@@ -171,6 +249,13 @@ uint32_t gait_feed(GaitState* st,
         }
     } else if (f < cfg->step_hyst_g) {
         st->armed = true;
+    }
+
+    /* 「中间平台」计数只算真正的半层平台：与到层同时发生的那一次是楼层平台，
+       不算中间平台（否则上 3 层楼会报 6 个中间平台）。half_flights 仍保留为
+       "平台总数（梯段数）"，两个量都不影响 steps/floor。 */
+    if ((ev & GAIT_EV_HALF) && !(ev & GAIT_EV_FLOOR)) {
+        st->mid_platforms++;
     }
 
     /* ---------- 5. 平台（真停顿）检测 ---------- */

@@ -184,9 +184,11 @@
                 <div class="item"><div class="k">已爬楼层</div><div class="v" id="climbed">--</div></div>
                 <div class="item"><div class="k">总台阶数</div><div class="v" id="steps">--</div></div>
                 <div class="item"><div class="k">步频(级/分)</div><div class="v" id="speed">--</div></div>
-                <div class="item"><div class="k">中间平台数</div><div class="v" id="half">--</div></div>
+                <div class="item"><div class="k">中间平台数（半层）</div><div class="v" id="half">--</div></div>
+                <div class="item"><div class="k">梯段总数</div><div class="v" id="flights">--</div></div>
                 <div class="item"><div class="k">当前状态</div><div class="v" id="pstate">--</div></div>
                 <div class="item"><div class="k">样本行数</div><div class="v" id="lines">--</div></div>
+                <div class="item"><div class="k">工作时间</div><div class="v" id="worktime">--</div></div>
                 <div class="item"><div class="k">最近事件</div><div class="v" id="lastev" style="font-size:12px;">--</div></div>
                 <div class="item"><div class="k">陀螺</div><div class="v" id="gyro" style="font-size:13px;">--</div></div>
             </div>
@@ -209,6 +211,19 @@
         const now = new Date().toLocaleTimeString();
         el.value += `[${now}] ${line}\n`;
         el.scrollTop = el.scrollHeight;
+    }
+
+    /* 设备名/用户名是外部可写的，拼 innerHTML 前必须转义（存储型 XSS） */
+    function esc(v) {
+        return String(v === null || v === undefined ? '' : v)
+            .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    }
+
+    function fmtDuration(sec) {
+        const s = Math.max(0, Math.floor(Number(sec) || 0));
+        const m = Math.floor(s / 60);
+        return `${String(m).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
     }
 
     function withAuthHeaders(extra = {}) {
@@ -251,7 +266,7 @@
         const prev = sel.value;
         sel.innerHTML = '<option value="all">全部终端</option>' +
             (data.devices || []).filter(d => d.source === 'sim')
-                .map(d => `<option value="${d.device_id}">${d.device_id}（${d.username || ''}）</option>`).join('');
+                .map(d => `<option value="${esc(d.device_id)}">${esc(d.device_id)}（${esc(d.username)}）</option>`).join('');
         if (prev && Array.from(sel.options).some(o => o.value === prev)) {
             sel.value = prev;
         }
@@ -323,9 +338,11 @@
             document.getElementById('climbed').textContent = data.climbed_floors ?? '--';
             document.getElementById('steps').textContent = data.steps ?? '--';
             document.getElementById('speed').textContent = data.speed ? Number(data.speed).toFixed(1) : '0.0';
-            document.getElementById('half').textContent = data.half_flights ?? '--';
+            document.getElementById('half').textContent = data.mid_platforms ?? '--';
+            document.getElementById('flights').textContent = data.half_flights ?? '--';
             document.getElementById('pstate').textContent = data.on_platform ? '平台' : '行进';
             document.getElementById('lines').textContent = data.file_lines ?? '--';
+            document.getElementById('worktime').textContent = fmtDuration(data.work_seconds);
             document.getElementById('lastev').textContent = data.last_event || '--';
             const gEl = document.getElementById('gyro');
             if (!data.gyro_samples) {

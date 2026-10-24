@@ -105,15 +105,16 @@ static void test_gait(const char* data_path) {
     }
     fclose(fp);
 
-    printf("  实测: %u 级台阶, 已上楼 %u 层, 当前 %u 层, %u 个梯段, 步频 %.1f\n",
-           st.steps, st.climbed, st.floor, st.half_flights,
+    printf("  实测: %u 级台阶, 已上楼 %u 层, 当前 %u 层, %u 个梯段（其中中间平台 %u 个）, 步频 %.1f\n",
+           st.steps, st.climbed, st.floor, st.half_flights, st.mid_platforms,
            (st.samples > 0) ? (float)st.steps * 60.0f / ((float)st.samples / cfg.fs) : 0.0f);
 
     int steps_ok = (st.steps >= 62 && st.steps <= 74);
     check("台阶数在 62~74 之间（标定值 68）", steps_ok);
     check("已上楼 3 层", st.climbed == 3);
     check("当前楼层 4 层", st.floor == 4);
-    check("中间平台 6 个梯段", st.half_flights == 6);
+    check("梯段 6 个（含 3 个楼层平台）", st.half_flights == 6);
+    check("真正的中间平台 3 个（不含楼层平台）", st.mid_platforms == 3);
 }
 
 int main(int argc, char** argv) {

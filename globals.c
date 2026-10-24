@@ -41,6 +41,7 @@ static void device_zero_state(Device* d) {
     d->total_steps = 0;
     d->speed_per_minute = 0.0f;
     d->half_flights = 0;
+    d->mid_platforms = 0;
     d->on_platform = false;
     d->buffer_index = 0;
     memset(d->accel_buffer, 0, sizeof(d->accel_buffer));

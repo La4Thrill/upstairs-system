@@ -39,6 +39,11 @@ static const char* hint_name(HintId id) {
     }
 }
 
+/* 纯函数：按 id 取固定文字。多设备并发时用这个，别用全局的 last_text。 */
+const char* audio_hint_text(HintId id) {
+    return hint_name(id);
+}
+
 /* 不同事件 → 不同系统音色（"发挥要求"：不同提示声音） */
 static void play_sound(HintId id) {
 #ifdef _WIN32

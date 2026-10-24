@@ -90,7 +90,8 @@ int main(int argc, char** argv) {
     printf("\nfile      : %s\n", path);
     printf("samples   : %u  (%.1fs @ %.0fHz)\n", st.samples, dur, st.cfg.fs);
     printf("steps     : %u   (平均 %.1f 级/分)\n", st.steps, dur > 0.0f ? st.steps * 60.0f / dur : 0.0f);
-    printf("half      : %u 个梯段\n", st.half_flights);
+    printf("half      : %u 个梯段（其中中间平台 %u 个，不含楼层平台）\n",
+           st.half_flights, st.mid_platforms);
     printf("floor     : 已上楼 %u 层，当前 %u 层（每层 %u 级）\n",
            st.climbed, st.floor, st.cfg.steps_per_floor);
     printf("events    : %d\n", events);

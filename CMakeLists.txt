@@ -67,3 +67,7 @@ target_link_libraries(gyro_check PRIVATE ${MATH_LIB})
 
 add_executable(selftest tools/selftest.c crypto_sha256.c)
 target_link_libraries(selftest PRIVATE gait_algo ${MATH_LIB})
+
+# 多数据集回归（含负样本）：regress testdata/expect.txt --strict
+add_executable(regress tools/regress.c)
+target_link_libraries(regress PRIVATE gait_algo ${MATH_LIB})
