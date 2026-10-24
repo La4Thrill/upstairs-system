@@ -50,15 +50,31 @@ int sim_get_sent_lines(int user_id);
 
 /**
  * @brief 加载预置数据场景
- * @param profile 场景名：mixed 或 upstairs3
+ * @param profile 场景名：upstairs3 / dailywalk / mixed
  * @return 成功返回 true
  */
 bool sim_load_profile(const char* profile);
 
 /**
+ * @brief 加载场景并可覆盖"循环发送"设置
+ * @param loop_override  -1=用场景默认值，0=单次发送，1=循环发送
+ */
+bool sim_load_profile_ex(const char* profile, int loop_override);
+
+/**
+ * @brief 当前是否循环发送
+ */
+bool sim_get_loop_mode(void);
+
+/**
  * @brief 获取当前数据场景名
  */
 const char* sim_get_profile(void);
+
+/**
+ * @brief 当前场景是否计入楼层（上楼场景 true；行走对照场景 false）
+ */
+bool sim_get_stair_mode(void);
 
 // ==========================================
 // 内部线程入口 (供 pthread_create 使用)

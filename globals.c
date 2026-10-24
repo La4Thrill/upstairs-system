@@ -9,12 +9,11 @@
 // 🌍 全局变量定义
 // ==========================================================
 
-// 1. 用户数据数组
+// 1. 用户/设备通道数组
 // 注意：必须与 global_vars.h 中的 extern 声明匹配
 User g_users[MAX_USERS];
 
 // 2. 系统状态结构体实例
-// 注意：必须与 global_vars.h 中的 extern SystemState g_system_state; 匹配
 SystemState g_system_state;
 
 // 3. 其他全局统计变量
@@ -40,19 +39,29 @@ void init_globals(void) {
     printf("[INIT] Initializing global variables...\n");
 
     for (int i = 0; i < MAX_USERS; i++) {
-        g_users[i].user_id = i;
-        snprintf(g_users[i].username, USERNAME_LEN, "Guest_%d", i);
-        snprintf(g_users[i].role, ROLE_LEN, "user");
-        snprintf(g_users[i].device_id, DEVICE_ID_LEN, "DEV_%03d", i);
+        User* u = &g_users[i];
+        memset(u, 0, sizeof(*u));
 
-        g_users[i].current_floor = 1;
-        g_users[i].total_steps = 0;
-        g_users[i].speed_per_minute = 0.0f;
-        g_users[i].sent_lines = 0;
-        g_users[i].buffer_index = 0;
-        memset(g_users[i].accel_buffer, 0, sizeof(g_users[i].accel_buffer));
-        memset(g_users[i].gyro_buffer, 0, sizeof(g_users[i].gyro_buffer));
-        pthread_mutex_init(&g_users[i].mutex, NULL);
+        u->user_id = i;
+        u->in_use = (i == 0);
+        snprintf(u->username, USERNAME_LEN, "Guest_%d", i);
+        snprintf(u->role, ROLE_LEN, "user");
+        snprintf(u->device_id, DEVICE_ID_LEN, "DEV_%03d", i);
+
+        u->current_floor = 1;
+        u->climbed_floors = 0;
+        u->total_steps = 0;
+        u->speed_per_minute = 0.0f;
+        u->sent_lines = 0;
+        u->half_flights = 0;
+        u->on_platform = false;
+        u->buffer_index = 0;
+        snprintf(u->last_event, sizeof(u->last_event), "none");
+        snprintf(u->last_hint, sizeof(u->last_hint), "none");
+
+        gait_init(&u->gait, NULL);   // 默认 50Hz / LSM9DS0 / 22 级每层
+
+        pthread_mutex_init(&u->mutex, NULL);
     }
 
     g_system_state.simulation_running = false;

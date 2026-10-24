@@ -3,6 +3,8 @@
 
 #include <stdbool.h>
 #include <time.h>
+#include "gait_algo.h"
+
 #ifdef _WIN32
 #include "pthread_compat.h"
 #else
@@ -13,11 +15,11 @@
 // ⚙️ 配置常量
 // ==========================================================
 
-#define MAX_USERS         100      // 最大支持用户数
+#define MAX_USERS         16       // 最大接入设备/用户通道数
 #define USERNAME_LEN      50       // 用户名最大长度
 #define DEVICE_ID_LEN     32       // 设备ID长度
 #define BUFFER_SIZE       10       // 兼容旧代码的缓冲常量
-#define DATA_BUFFER_SIZE  32       // 传感器数据缓冲区大小
+#define DATA_BUFFER_SIZE  256      // 传感器波形缓冲长度（@50Hz ≈ 5.1 s）
 #define MAX_FLOORS        99       // 最大楼层支持
 #define ROLE_LEN          16       // 角色长度
 
@@ -26,24 +28,38 @@
 // ==========================================================
 
 /**
- * @brief 用户数据结构
+ * @brief 用户/设备通道数据结构
  *
- * 存储单个用户的爬楼梯模拟数据。
+ * 一个 User 对应一个"模拟终端/采集对象"通道：自带算法状态、波形缓冲、
+ * 计数与提示音记录。模拟器与（将来的）真实设备都只往自己的通道写。
  */
 typedef struct {
     int user_id;                      // 用户ID
-    char username[USERNAME_LEN];      // 用户名
+    bool in_use;                      // 该通道是否已激活
+    char username[USERNAME_LEN];      // 用户名（采集对象）
     char role[ROLE_LEN];              // 角色：admin / user / monitor
     char device_id[DEVICE_ID_LEN];    // 终端/设备ID
-    int current_floor;                // 当前楼层
-    int total_steps;                  // 总步数
-    float speed_per_minute;           // 速度 (步/分钟)
-    int sent_lines;                   // 已发送样本行数
-    int buffer_index;                 // 环形缓冲区索引
-    pthread_mutex_t mutex;            // 用户级互斥锁
 
-    float accel_buffer[DATA_BUFFER_SIZE];
-    float gyro_buffer[DATA_BUFFER_SIZE];
+    int current_floor;                // 当前楼层（1..99）
+    int climbed_floors;               // 已上楼数（0..98）
+    int total_steps;                  // 总台阶数
+    float speed_per_minute;           // 步频 (步/分钟)
+    int sent_lines;                   // 已发送样本行数
+    int half_flights;                 // 已到达的中间平台数
+    bool on_platform;                 // 当前是否停在平台
+    int user_id_source;               // 保留字段（兼容）
+
+    int buffer_index;                 // 环形缓冲区索引
+    float accel_buffer[DATA_BUFFER_SIZE];  // 加速度模长（g）
+    float gyro_buffer[DATA_BUFFER_SIZE];   // 角速度模长（°/s）
+    float dyn_buffer[DATA_BUFFER_SIZE];    // 滤波后动态加速度（g）——分析后结果
+
+    char last_event[48];              // 最近一次事件文字描述
+    float last_event_time;            // 最近事件时刻（模拟时间 s）
+    char last_hint[48];               // 最近提示音
+
+    GaitState gait;                   // 步态/楼层算法状态
+    pthread_mutex_t mutex;            // 用户级互斥锁
 } User;
 
 /**

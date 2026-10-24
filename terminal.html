@@ -158,8 +158,9 @@
     <div class="row">
         <label>场景：</label>
         <select id="profile">
-            <option value="mixed">mixed（data1+data2）</option>
-            <option value="upstairs3">upstairs3（data1）</option>
+            <option value="upstairs3">upstairs3（上三层楼，判层）</option>
+            <option value="dailywalk">dailywalk（日常行走，只计步）</option>
+            <option value="mixed">mixed（data1+data2，只计步）</option>
         </select>
         <span>状态：<b id="runState" class="stop">已停止</b></span>
     </div>
@@ -179,8 +180,12 @@
             <div class="kv">
                 <div class="item"><div class="k">当前楼层</div><div class="v" id="floor">--</div></div>
                 <div class="item"><div class="k">已爬楼层</div><div class="v" id="climbed">--</div></div>
-                <div class="item"><div class="k">总步数</div><div class="v" id="steps">--</div></div>
+                <div class="item"><div class="k">总台阶数</div><div class="v" id="steps">--</div></div>
+                <div class="item"><div class="k">步频(级/分)</div><div class="v" id="speed">--</div></div>
+                <div class="item"><div class="k">中间平台数</div><div class="v" id="half">--</div></div>
+                <div class="item"><div class="k">当前状态</div><div class="v" id="pstate">--</div></div>
                 <div class="item"><div class="k">样本行数</div><div class="v" id="lines">--</div></div>
+                <div class="item"><div class="k">最近事件</div><div class="v" id="lastev" style="font-size:12px;">--</div></div>
             </div>
             <h4 style="margin-top:12px;">实时日志</h4>
             <textarea id="log" readonly></textarea>
@@ -293,7 +298,11 @@
             document.getElementById('floor').textContent = data.current_floor ?? '--';
             document.getElementById('climbed').textContent = data.climbed_floors ?? '--';
             document.getElementById('steps').textContent = data.steps ?? '--';
+            document.getElementById('speed').textContent = data.speed ? Number(data.speed).toFixed(1) : '0.0';
+            document.getElementById('half').textContent = data.half_flights ?? '--';
+            document.getElementById('pstate').textContent = data.on_platform ? '平台' : '行进';
             document.getElementById('lines').textContent = data.file_lines ?? '--';
+            document.getElementById('lastev').textContent = data.last_event || '--';
 
             const stateEl = document.getElementById('runState');
             if (data.running) {

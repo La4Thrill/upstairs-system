@@ -70,6 +70,17 @@ static void close_socket_safe(int sock) {
 #endif
 }
 
+static void send_all(int client_sock, const char* data, int len) {
+    int sent = 0;
+    while (sent < len) {
+        int n = send(client_sock, data + sent, len - sent, 0);
+        if (n <= 0) {
+            break;
+        }
+        sent += n;
+    }
+}
+
 static void send_text_response(int client_sock, const char* status, const char* content_type, const char* body) {
     if (!body) {
         body = "";
@@ -88,15 +99,15 @@ static void send_text_response(int client_sock, const char* status, const char* 
         "Connection: close\r\n\r\n",
         status, content_type, len);
 
-    send(client_sock, header, (int)strlen(header), 0);
+    send_all(client_sock, header, (int)strlen(header));
     if (len > 0) {
-        send(client_sock, body, len, 0);
+        send_all(client_sock, body, len);
     }
 }
 
 static void send_json_response(int client_sock, const char* status, cJSON* root) {
     char* json = cJSON_PrintUnformatted(root);
-    send_text_response(client_sock, status, "application/json", json ? json : "{}");
+    send_text_response(client_sock, status, "application/json; charset=utf-8", json ? json : "{}");
     if (json) {
         free(json);
     }
@@ -379,25 +390,55 @@ static void handle_get(int client_sock, const char* path, const Session* session
 
         cJSON* root = cJSON_CreateObject();
 
-        User snapshot;
-        memset(&snapshot, 0, sizeof(snapshot));
-        pthread_mutex_lock(&g_users[0].mutex);
-        snapshot = g_users[0];
-        pthread_mutex_unlock(&g_users[0].mutex);
+        /* 逐字段快照：不再整体拷贝含 CRITICAL_SECTION 的结构体 */
+        User* u = &g_users[0];
+        pthread_mutex_lock(&u->mutex);
+        int   current_floor  = u->current_floor;
+        int   climbed        = u->climbed_floors;
+        int   steps          = u->total_steps;
+        float speed          = u->speed_per_minute;
+        int   lines          = u->sent_lines;
+        int   half_flights   = u->half_flights;
+        bool  on_platform    = u->on_platform;
+        int   idx            = u->buffer_index;
+        float last_ev_t      = u->last_event_time;
+        float fs             = u->gait.cfg.fs;
+        int   steps_per_floor = (int)u->gait.cfg.steps_per_floor;
+        char  last_event[48];
+        char  last_hint[48];
+        snprintf(last_event, sizeof(last_event), "%s", u->last_event);
+        snprintf(last_hint, sizeof(last_hint), "%s", u->last_hint);
 
-        cJSON_AddStringToObject(root, "username", snapshot.username);
-        cJSON_AddStringToObject(root, "device_id", snapshot.device_id);
-        cJSON_AddNumberToObject(root, "current_floor", snapshot.current_floor);
-        cJSON_AddNumberToObject(root, "climbed_floors", snapshot.current_floor > 1 ? (snapshot.current_floor - 1) : 0);
-        cJSON_AddNumberToObject(root, "steps", snapshot.total_steps);
-        cJSON_AddNumberToObject(root, "speed", snapshot.speed_per_minute);
-        cJSON_AddNumberToObject(root, "file_lines", snapshot.sent_lines);
+        float accel_wave[DATA_BUFFER_SIZE];
+        float gyro_wave[DATA_BUFFER_SIZE];
+        float dyn_wave[DATA_BUFFER_SIZE];
+        memcpy(accel_wave, u->accel_buffer, sizeof(accel_wave));
+        memcpy(gyro_wave, u->gyro_buffer, sizeof(gyro_wave));
+        memcpy(dyn_wave, u->dyn_buffer, sizeof(dyn_wave));
+        pthread_mutex_unlock(&u->mutex);
+
+        cJSON_AddStringToObject(root, "username", g_users[0].username);
+        cJSON_AddStringToObject(root, "device_id", g_users[0].device_id);
+        cJSON_AddNumberToObject(root, "current_floor", current_floor);
+        cJSON_AddNumberToObject(root, "climbed_floors", climbed);
+        cJSON_AddNumberToObject(root, "steps", steps);
+        cJSON_AddNumberToObject(root, "speed", speed);
+        cJSON_AddNumberToObject(root, "file_lines", lines);
+        cJSON_AddNumberToObject(root, "half_flights", half_flights);
+        cJSON_AddBoolToObject(root, "on_platform", on_platform);
         cJSON_AddBoolToObject(root, "running", sim_is_running());
         cJSON_AddNumberToObject(root, "max_floors", g_max_floors);
+        cJSON_AddNumberToObject(root, "fs", fs);
+        cJSON_AddNumberToObject(root, "steps_per_floor", steps_per_floor);
+        cJSON_AddBoolToObject(root, "stair_mode", sim_get_stair_mode());
         cJSON_AddStringToObject(root, "profile", sim_get_profile());
+        cJSON_AddStringToObject(root, "last_event", last_event);
+        cJSON_AddStringToObject(root, "last_hint", last_hint);
+        cJSON_AddNumberToObject(root, "last_event_time", last_ev_t);
 
-        add_wave_array(root, "accel_wave", snapshot.accel_buffer, snapshot.buffer_index);
-        add_wave_array(root, "gyro_wave", snapshot.gyro_buffer, snapshot.buffer_index);
+        add_wave_array(root, "accel_wave", accel_wave, idx);
+        add_wave_array(root, "gyro_wave", gyro_wave, idx);
+        add_wave_array(root, "dyn_wave", dyn_wave, idx);
 
         send_json_response(client_sock, "200 OK", root);
         cJSON_Delete(root);
@@ -493,14 +534,26 @@ static void handle_post(int client_sock, const char* path, const char* req_body,
         const cJSON* j_profile = payload ? cJSON_GetObjectItemCaseSensitive(payload, "profile") : NULL;
         const char* profile = cJSON_IsString(j_profile) ? j_profile->valuestring : NULL;
 
+        const cJSON* j_loop = payload ? cJSON_GetObjectItemCaseSensitive(payload, "loop") : NULL;
+        int loop_override = -1;
+        if (cJSON_IsBool(j_loop)) {
+            loop_override = cJSON_IsTrue(j_loop) ? 1 : 0;
+        } else if (cJSON_IsNumber(j_loop)) {
+            loop_override = (j_loop->valueint != 0) ? 1 : 0;
+        }
+
         cJSON* root = cJSON_CreateObject();
-        if (sim_load_profile(profile)) {
+        if (sim_load_profile_ex(profile, loop_override)) {
+            /* 切换场景后需要把步数/楼层计数归零，交给模拟线程执行 */
+            g_reset_requested = true;
             cJSON_AddStringToObject(root, "status", "loaded");
             cJSON_AddStringToObject(root, "profile", sim_get_profile());
+            cJSON_AddBoolToObject(root, "stair_mode", sim_get_stair_mode());
+            cJSON_AddBoolToObject(root, "loop", sim_get_loop_mode());
             send_json_response(client_sock, "200 OK", root);
         } else {
             cJSON_AddStringToObject(root, "status", "error");
-            cJSON_AddStringToObject(root, "message", "invalid profile, use mixed or upstairs3");
+            cJSON_AddStringToObject(root, "message", "invalid profile, use upstairs3 | dailywalk | mixed");
             send_json_response(client_sock, "400 Bad Request", root);
         }
 

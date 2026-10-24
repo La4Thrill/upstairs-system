@@ -159,9 +159,11 @@
     <div class="row">
         <label>加载文件场景：</label>
         <select id="profile-select">
-            <option value="mixed">混合运动数据（data1+data2）</option>
-            <option value="upstairs3">上三楼数据（data1）</option>
+            <option value="upstairs3">上三层楼数据（data1，上楼场景）</option>
+            <option value="dailywalk">日常行走数据（data2，对照场景，只计步不判层）</option>
+            <option value="mixed">混合场景（data1+data2，只计步不判层）</option>
         </select>
+        <label style="font-size:13px;"><input type="checkbox" id="loop-check" /> 循环发送</label>
         <button class="btn-primary" onclick="loadProfile()">加载文件</button>
         <button class="btn-start" onclick="sendCommand('start')">开始</button>
         <button class="btn-stop" onclick="sendCommand('stop')">停止</button>
@@ -174,21 +176,33 @@
     <div class="metrics">
         <div class="metric"><div class="k">当前楼层</div><div class="v" id="floor-v">--</div></div>
         <div class="metric"><div class="k">已爬楼层</div><div class="v" id="climbed-v">--</div></div>
-        <div class="metric"><div class="k">总步数</div><div class="v" id="steps-v">--</div></div>
-        <div class="metric"><div class="k">角速度/加速度样本行</div><div class="v" id="lines-v">--</div></div>
+        <div class="metric"><div class="k">总台阶数</div><div class="v" id="steps-v">--</div></div>
+        <div class="metric"><div class="k">步频 (级/分)</div><div class="v" id="speed-v">--</div></div>
+        <div class="metric"><div class="k">中间平台数</div><div class="v" id="half-v">--</div></div>
+        <div class="metric"><div class="k">当前状态</div><div class="v" id="state-v" style="font-size:18px;">--</div></div>
+    </div>
+    <div style="margin-top:10px;font-size:13px;color:#4b5563;">
+        最近事件：<b id="last-event">--</b>
+        <span style="margin-left:12px;">提示音：<b id="last-hint">--</b></span>
+        <span style="margin-left:12px;">每层台阶数（标定值）：<b id="spf-v">--</b></span>
+        <span style="margin-left:12px;">采样率：<b id="fs-v">--</b> Hz</span>
     </div>
 </div>
 
 <div class="panel hidden" id="wave-panel">
-    <h3>波形验证（确认爬楼精准性）</h3>
+    <h3>波形验证（原始信号 + 分析后结果）</h3>
     <div class="wave-grid">
         <div class="wave-card">
-            <div>加速度波形</div>
+            <div>加速度模长 |a|（g）</div>
             <canvas id="accel-canvas" width="500" height="220"></canvas>
         </div>
         <div class="wave-card">
-            <div>角速度波形</div>
+            <div>角速度模长 |ω|（°/s）</div>
             <canvas id="gyro-canvas" width="500" height="220"></canvas>
+        </div>
+        <div class="wave-card" style="grid-column: 1 / -1;">
+            <div>去重力后的动态加速度（g，算法输入，红色虚线为台阶判定阈值）</div>
+            <canvas id="dyn-canvas" width="1000" height="220"></canvas>
         </div>
     </div>
 </div>
@@ -282,10 +296,11 @@
 
     async function loadProfile() {
         const profile = document.getElementById('profile-select').value;
+        const loop = document.getElementById('loop-check').checked;
         const res = await apiFetch('/api/sim/load', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ profile })
+            body: JSON.stringify({ profile, loop })
         });
 
         if (!res.ok) {
@@ -295,12 +310,13 @@
         }
 
         const data = await res.json();
-        setMsg('已加载场景：' + data.profile);
+        setMsg(`已加载场景：${data.profile}（${data.stair_mode ? '判断楼层' : '只计步'}，${data.loop ? '循环' : '单次'}发送）`);
         await fetchStatus();
     }
 
     function drawWave(canvasId, values, color) {
         const canvas = document.getElementById(canvasId);
+        if (!canvas) return;
         const ctx = canvas.getContext('2d');
         const w = canvas.width;
         const h = canvas.height;
@@ -337,6 +353,55 @@
         ctx.stroke();
     }
 
+    // 动态加速度：固定量程 + 台阶阈值线，便于判断"算法是否抓到了台阶"
+    function drawDynWave(canvasId, values, threshold) {
+        const canvas = document.getElementById(canvasId);
+        if (!canvas) return;
+        const ctx = canvas.getContext('2d');
+        const w = canvas.width;
+        const h = canvas.height;
+        const yMax = 0.6;   // g
+
+        const toY = (v) => h / 2 - (v / yMax) * (h / 2 - 6);
+
+        ctx.clearRect(0, 0, w, h);
+
+        // 零线
+        ctx.strokeStyle = '#e5e7eb';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(0, toY(0));
+        ctx.lineTo(w, toY(0));
+        ctx.stroke();
+
+        // 阈值线
+        if (threshold) {
+            ctx.strokeStyle = '#fca5a5';
+            ctx.setLineDash([6, 4]);
+            ctx.beginPath();
+            ctx.moveTo(0, toY(threshold));
+            ctx.lineTo(w, toY(threshold));
+            ctx.moveTo(0, toY(-threshold));
+            ctx.lineTo(w, toY(-threshold));
+            ctx.stroke();
+            ctx.setLineDash([]);
+        }
+
+        if (!values || values.length === 0) return;
+
+        const stepX = w / Math.max(values.length - 1, 1);
+        ctx.strokeStyle = '#16a34a';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        values.forEach((v, i) => {
+            const x = i * stepX;
+            const y = toY(v);
+            if (i === 0) ctx.moveTo(x, y);
+            else ctx.lineTo(x, y);
+        });
+        ctx.stroke();
+    }
+
     async function fetchStatus() {
         const res = await apiFetch('/api/status?t=' + Date.now());
         if (!res.ok) {
@@ -352,14 +417,24 @@
         document.getElementById('floor-v').textContent = data.current_floor ?? '--';
         document.getElementById('climbed-v').textContent = data.climbed_floors ?? '--';
         document.getElementById('steps-v').textContent = data.steps ?? '--';
-        document.getElementById('lines-v').textContent = data.file_lines ?? '--';
+        document.getElementById('speed-v').textContent = data.speed ? Number(data.speed).toFixed(1) : '0.0';
+        document.getElementById('half-v').textContent = data.half_flights ?? '--';
+        document.getElementById('state-v').textContent = data.on_platform ? '平台停留' : (data.running ? '行进中' : '未运行');
+        document.getElementById('last-event').textContent = data.last_event || '--';
+        document.getElementById('last-hint').textContent = data.last_hint || '--';
+        document.getElementById('spf-v').textContent = data.steps_per_floor ?? '--';
+        document.getElementById('fs-v').textContent = data.fs ?? '--';
 
         if (data.profile) {
-            document.getElementById('profile-select').value = data.profile;
+            const sel = document.getElementById('profile-select');
+            if (sel && sel.querySelector(`option[value="${data.profile}"]`)) {
+                sel.value = data.profile;
+            }
         }
 
         drawWave('accel-canvas', data.accel_wave || [], '#2563eb');
         drawWave('gyro-canvas', data.gyro_wave || [], '#dc2626');
+        drawDynWave('dyn-canvas', data.dyn_wave || [], 0.18);
     }
 
     async function fetchHistory() {
