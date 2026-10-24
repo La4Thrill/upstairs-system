@@ -188,8 +188,18 @@ $r.device_key   # 第一次才有
 
 1. **陀螺到底出不出数。**
    现有数据集里三轴角速度的标准差都 < 0.1 °/s（近似常量偏置，见 README），
-   所以算法只用加速度。真机上先用串口把 `gx gy gz` 打出来晃动一下板子，
-   确认数值有变化，再谈"上下楼方向判别""平台转弯检测"。
+   所以算法只用加速度。真机上直接跑 `gyro_check.exe` 验证：
+
+   ```powershell
+   # 一边在串口打印 gx gy gz ax ay az（每行 6 个整数），一边验证
+   $port = New-Object System.IO.Ports.SerialPort COM3,115200
+   $port.Open()
+   while ($true) { $port.ReadLine() } | .\gyro_check.exe - --every 200
+   ```
+
+   - 输出 `【陀螺无效】` → 先查量程配置（`CTRL_REG4`）、使能位（`CTRL_REG1`）、接线；
+   - 输出 `【陀螺有效】` → 再做方向判别/平台转弯检测；
+   - 服务端也会实时统计：`/api/status` 的 `gyro_std` / `gyro_valid`，网页上直接显示"陀螺：有效/无效"。
 2. **量程与灵敏度。** LSM9DS0 加速度 ±2g / 角速度 ±245dps 对应 16384 LSB/g 与 114.29 LSB/dps。
    如果 CubeMX 里配了 ±4g，服务端换算会差 2 倍。
 3. **采样率。** 定时器 20 ms 一次，实测用串口打印时间戳核对；50 Hz 是楼层判定的基准，

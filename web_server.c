@@ -59,9 +59,6 @@ typedef struct {
 } Session;
 
 static int g_server_socket = -1;
-static Session g_sessions[MAX_SESSIONS];
-static pthread_mutex_t g_session_mutex;
-static bool g_session_mutex_inited = false;
 
 /* ---------------- 基础工具 ---------------- */
 
@@ -230,30 +227,15 @@ static void create_session(const char* username, const char* role, int user_id,
         return;
     }
 
-    pthread_mutex_lock(&g_session_mutex);
+    char token[TOKEN_LEN + 1] = {0};
+    generate_token(token, sizeof(token));
 
-    int slot = -1;
-    time_t now = time(NULL);
-    for (int i = 0; i < MAX_SESSIONS; ++i) {
-        if (!g_sessions[i].active || g_sessions[i].expires_at <= now) {
-            slot = i;
-            break;
-        }
-    }
-    if (slot < 0) {
-        slot = 0;
+    /* 会话持久化到 SQLite：服务重启后仍有效 */
+    if (!db_session_create(token, username, role, user_id, SESSION_TTL_SECONDS)) {
+        fprintf(stderr, "[WEB] session persist failed for %s\n", username);
     }
 
-    generate_token(g_sessions[slot].token, sizeof(g_sessions[slot].token));
-    snprintf(g_sessions[slot].username, sizeof(g_sessions[slot].username), "%s", username);
-    snprintf(g_sessions[slot].role, sizeof(g_sessions[slot].role), "%s", role);
-    g_sessions[slot].user_id = user_id;
-    g_sessions[slot].expires_at = now + SESSION_TTL_SECONDS;
-    g_sessions[slot].active = true;
-
-    snprintf(out_token, out_len, "%s", g_sessions[slot].token);
-
-    pthread_mutex_unlock(&g_session_mutex);
+    snprintf(out_token, out_len, "%s", token);
 }
 
 static bool get_session(const char* token, Session* out_session) {
@@ -261,29 +243,23 @@ static bool get_session(const char* token, Session* out_session) {
         return false;
     }
 
-    pthread_mutex_lock(&g_session_mutex);
+    char username[64] = {0};
+    char role[16] = {0};
+    int user_id = 0;
 
-    bool found = false;
-    time_t now = time(NULL);
-    for (int i = 0; i < MAX_SESSIONS; ++i) {
-        if (!g_sessions[i].active) {
-            continue;
-        }
-        if (g_sessions[i].expires_at <= now) {
-            g_sessions[i].active = false;
-            continue;
-        }
-        if (strcmp(g_sessions[i].token, token) == 0) {
-            if (out_session) {
-                *out_session = g_sessions[i];
-            }
-            found = true;
-            break;
-        }
+    if (!db_session_lookup(token, username, sizeof(username), role, sizeof(role), &user_id)) {
+        return false;
     }
 
-    pthread_mutex_unlock(&g_session_mutex);
-    return found;
+    if (out_session) {
+        memset(out_session, 0, sizeof(*out_session));
+        out_session->active = true;
+        snprintf(out_session->token, sizeof(out_session->token), "%s", token);
+        snprintf(out_session->username, sizeof(out_session->username), "%s", username);
+        snprintf(out_session->role, sizeof(out_session->role), "%s", role);
+        out_session->user_id = user_id;
+    }
+    return true;
 }
 
 static bool has_role(const Session* session, const char* role_a, const char* role_b) {
@@ -487,6 +463,9 @@ static void device_status_json(cJSON* root, int idx) {
     cJSON_AddNumberToObject(root, "steps_per_floor", d->gait.cfg.steps_per_floor);
     cJSON_AddBoolToObject(root, "stair_mode", d->gait.cfg.count_floors);
     cJSON_AddNumberToObject(root, "step_thr", d->gait.cfg.step_thr_g);
+    cJSON_AddNumberToObject(root, "gyro_std", d->gyro_std);
+    cJSON_AddBoolToObject(root, "gyro_valid", d->gyro_valid);
+    cJSON_AddNumberToObject(root, "gyro_samples", (double)d->gyro_n);
 
     add_wave_array(root, "accel_wave", d->accel_buffer, d->buffer_index);
     add_wave_array(root, "gyro_wave", d->gyro_buffer, d->buffer_index);
@@ -632,6 +611,7 @@ static void handle_ingest(int client_sock, const char* req_body, const char* dev
         d->gyro_buffer[d->buffer_index] = gyro_dps;
         d->dyn_buffer[d->buffer_index] = dyn_g;
         d->buffer_index = (d->buffer_index + 1) % DATA_BUFFER_SIZE;
+        device_note_gyro_locked(d, gyro_dps);   /* 陀螺有效性自检 */
         pthread_mutex_unlock(&d->mutex);
     }
 
@@ -909,6 +889,58 @@ static void handle_post(int client_sock, const char* path, const char* req_body,
         return;
     }
 
+    if (strcmp(path, "/api/logout") == 0) {
+        cJSON* root = cJSON_CreateObject();
+        if (session && session->token[0] && db_session_delete(session->token)) {
+            cJSON_AddStringToObject(root, "status", "logged_out");
+            send_json_response(client_sock, "200 OK", root);
+        } else {
+            cJSON_AddStringToObject(root, "status", "no_session");
+            send_json_response(client_sock, "200 OK", root);
+        }
+        cJSON_Delete(root);
+        return;
+    }
+
+    if (strcmp(path, "/api/maintenance/retention") == 0) {
+        if (!session || strcmp(session->role, "admin") != 0) {
+            cJSON* root = cJSON_CreateObject();
+            cJSON_AddStringToObject(root, "error", "forbidden");
+            send_json_response(client_sock, "403 Forbidden", root);
+            cJSON_Delete(root);
+            return;
+        }
+
+        cJSON* payload = req_body ? cJSON_Parse(req_body) : NULL;
+        int keep_rows = 0;
+        int keep_days = 0;
+        if (payload) {
+            const cJSON* j_keep = cJSON_GetObjectItemCaseSensitive(payload, "keep");
+            const cJSON* j_days = cJSON_GetObjectItemCaseSensitive(payload, "days");
+            if (cJSON_IsNumber(j_keep)) {
+                keep_rows = j_keep->valueint;
+            }
+            if (cJSON_IsNumber(j_days)) {
+                keep_days = j_days->valueint;
+            }
+            cJSON_Delete(payload);
+        }
+
+        RetentionStats stats;
+        db_run_retention(keep_rows, keep_days, &stats);
+
+        cJSON* root = cJSON_CreateObject();
+        cJSON_AddStringToObject(root, "status", "retention_done");
+        cJSON_AddNumberToObject(root, "raw_deleted", stats.raw_deleted);
+        cJSON_AddNumberToObject(root, "snapshots_deleted", stats.snapshots_deleted);
+        cJSON_AddNumberToObject(root, "events_deleted", stats.events_deleted);
+        cJSON_AddNumberToObject(root, "sessions_deleted", stats.sessions_deleted);
+        cJSON_AddNumberToObject(root, "raw_rows_now", db_raw_count(NULL));
+        send_json_response(client_sock, "200 OK", root);
+        cJSON_Delete(root);
+        return;
+    }
+
     if (strcmp(path, "/api/sim/load") == 0) {
         if (!require_role_monitor_or_admin(client_sock, session)) {
             return;
@@ -1081,10 +1113,8 @@ void start_web_server(void) {
         rng_init();
     }
 
-    if (!g_session_mutex_inited) {
-        pthread_mutex_init(&g_session_mutex, NULL);
-        g_session_mutex_inited = true;
-    }
+    /* 启动时清一次过期会话 */
+    db_session_purge_expired();
 
     g_server_socket = socket(AF_INET, SOCK_STREAM, 0);
     if (g_server_socket < 0) {

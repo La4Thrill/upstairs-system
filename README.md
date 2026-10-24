@@ -19,6 +19,10 @@
 | 原始数据落库 | 表建了没用 | **`raw_samples` 批量入库**，可按设备回看 |
 | 历史记录 | 每一步一行、所有用户混在一起 | **按设备、每 5 s 一条进度快照 + 楼层事件明细** |
 | 权限 | 页面藏个按钮 | **user 只能看自己的设备**，越权返回 403 |
+| 口令存储 | 明文 | **加盐 SHA-256**（`sha256$盐$摘要`），旧明文库自动迁移 |
+| 会话 | 只在内存，重启全掉线 | **持久化到数据库**，重启不掉线，支持登出 |
+| 原始数据 | 表建了没用、无限增长 | **批量入库 + 保留策略**（按天 + 按行数清理） |
+| 陀螺 | 默认"能用" | **有效性自检**：`gyro_check` 工具 + 状态上报 + 页面标识 |
 
 ---
 
@@ -163,9 +167,92 @@ X-Device-Key: <首次上报时下发>
 
 ---
 
-## 7. 构建与运行
+## 7. 安全、会话与数据治理
 
-### 7.1 CMake
+### 7.1 口令：加盐 SHA-256
+
+- `crypto_sha256.c` 自带 SHA-256（不依赖 OpenSSL），已用 FIPS 标准向量自测（见 `tools/selftest.c`）。
+- 库里只存 `sha256$<32位盐>$<64位摘要>`，同一口令两次生成结果不同（盐随机）。
+- **旧库自动迁移**：启动时把仍是明文的口令就地升级，日志会打印 `[DB] 4 个明文口令已升级为加盐哈希`。
+- 局限：这是"快速哈希"，抗暴力破解能力有限；课程演示够用，生产环境应换 PBKDF2/Argon2。
+
+### 7.2 会话：持久化到 SQLite
+
+- 登录后 token 写入 `sessions` 表（含 `expires_at`，默认 12 小时）；
+- 服务重启后同一 token 仍可继续用（实测：重启后 `/api/session` 仍返回 200）；
+- `POST /api/logout` 立即删除该 token，之后访问返回 401；
+- 过期 token 在启动时与后台维护线程里清理。
+
+### 7.3 原始数据保留策略
+
+| 项 | 默认值 | 说明 |
+|---|---|---|
+| 每台设备保留行数 | 20000（≈6.7 分钟 @50Hz） | 超出后删最旧的 |
+| 保留天数 | 7 天 | 原始样本、进度快照、事件明细都按天清理 |
+| 清理时机 | 启动时 + 每 60 s | `server.c` 的后台维护线程 |
+
+管理员可临时手动触发（也用于演示/测试）：
+
+```http
+POST /api/maintenance/retention
+{"keep": 5000, "days": 3}
+→ {"status":"retention_done","raw_deleted":1300,"raw_rows_now":100,...}
+```
+
+---
+
+## 8. 陀螺验证（先验，再谈方向判别）
+
+课题给的数据集里三轴角速度**几乎是常量**：模长均值 10.26 °/s、标准差只有 0.061 °/s。
+也就是说"陀螺没出数"，任何依赖陀螺的功能（上下楼方向判别、平台转弯检测）都不能做。
+
+### 8.1 离线/实时验证工具
+
+```powershell
+gcc -std=c99 -O2 -o gyro_check.exe tools\gyro_check.c -lm
+.\gyro_check.exe "E:\数据文件\数据文件\九轴数据文件\上三层楼数据.txt"
+```
+
+对数据集的输出：
+
+```
+角速度模长    : 均值 10.26 °/s, 标准差 0.061 °/s
+  gyro_x       : 均值    -5.77 °/s, 标准差  0.073 °/s
+  gyro_y       : 均值     1.49 °/s, 标准差  0.062 °/s
+  gyro_z       : 均值    -8.35 °/s, 标准差  0.054 °/s
+明显转动样本  : 0 个 (0.00%，相对基线偏离 > 5 °/s)
+结论          : 【陀螺无效】近似常量偏置，数据里没有真实转动
+```
+
+判据：模长标准差 < 0.2 °/s → 无效；0.2~0.5 → 存疑；≥ 0.5 且有明显转动样本 → 有效
+（用一份带 20 dps 正弦的合成数据验证过，会判"有效"）。
+
+接上真机后可以边转板子边看：
+
+```powershell
+$port = New-Object System.IO.Ports.SerialPort COM3,115200
+$port.Open()
+while ($true) { $port.ReadLine() } | .\gyro_check.exe - --every 200
+```
+
+### 8.2 服务端也一直在算
+
+每台设备都在维护角速度的在线均值/方差（Welford），`/api/status` 与 `/api/devices` 返回：
+
+| 字段 | 含义 |
+|---|---|
+| `gyro_std` | 角速度模长标准差（°/s） |
+| `gyro_valid` | 是否有效（样本 ≥ 200 且 σ ≥ 0.5 °/s） |
+| `gyro_samples` | 参与统计的样本数 |
+
+网页"爬楼结果"里会显示 `陀螺：无效（σ=0.06 °/s）` 并说明"当前只用加速度判层与计步"。
+真机陀螺一旦有数据，这里会自动变成绿色"有效"，再做方向判别就有依据了。
+
+---
+
+## 9. 构建与运行
+
+### 9.1 CMake
 
 ```powershell
 cmake -S . -B build
@@ -173,11 +260,11 @@ cmake --build build --config Release -j 4
 .\build\Release\server.exe
 ```
 
-### 7.2 直接用 gcc（最快验证）
+### 9.2 直接用 gcc（最快验证）
 
 ```powershell
-gcc -std=c99 -O2 -o server.exe server.c globals.c web_server.c simulator.c gait_algo.c `
-    db_manager.c audio_hint.c cjson.c sqlite3.c -lws2_32 -lwinmm -lm
+gcc -std=c99 -O2 -o server.exe server.c globals.c web_server.c simulator.c gait_algo.c `r
+    db_manager.c crypto_sha256.c audio_hint.c cjson.c sqlite3.c -lws2_32 -lwinmm -lm
 .\server.exe
 ```
 
@@ -186,7 +273,7 @@ gcc -std=c99 -O2 -o server.exe server.c globals.c web_server.c simulator.c gait_
 
 ---
 
-## 8. 算法回归工具
+## 10. 算法回归工具与自检
 
 ```powershell
 gcc -std=c99 -O2 -o algo_check.exe tools\algo_check.c gait_algo.c -lm
@@ -203,23 +290,36 @@ floor     : 已上楼 3 层，当前 4 层（每层 22 级）
 
 参数：`<数据文件> [1/0 是否判层] [步态阈值，可选]`。
 
+### 10.2 自检（可直接写进设计报告的"测试记录"）
+
+```powershell
+gcc -std=c99 -O2 -o selftest.exe tools\selftest.c crypto_sha256.c gait_algo.c -lm
+.\selftest.exe "E:\数据文件\数据文件\九轴数据文件\上三层楼数据.txt"
+```
+
+覆盖 16 项：SHA-256 三个标准向量、口令加盐哈希（正确/错误口令、盐随机性、明文兼容）、
+步态算法（68 级台阶 / 已上楼 3 层 / 6 个梯段）。实测 `16 通过, 0 失败`。
+
+### 10.3 陀螺验证
+
+见第 8 节 `tools/gyro_check.c`。
+
 ---
 
-## 9. 已知限制 / 下一步
+## 11. 已知限制 / 下一步
 
-1. **陀螺数据不可用**：数据集三轴角速度标准差 < 0.1 °/s（近似常量偏置），所以现在只用了加速度，
-   上下楼方向判别做不了。硬件阶段必须先确认 LSM9DS0 陀螺出数（见协议文档第 6 节）。
-2. **密码仍是明文**：`auth_accounts.password` 直接存明文，注册/改密接口也没有。课程演示够用，
-   要加固就上"盐 + SHA-256"。
-3. **会话在内存里**：服务重启后所有人要重新登录；没有登出接口。
-4. **`raw_samples` 会一直增长**：50 Hz × 2 台 ≈ 36 万行/小时，演示没问题，
-   长期跑需要加保留策略（比如只留最近 7 天）。
+1. **陀螺数据不可用**：数据集三轴角速度标准差 < 0.1 °/s，现在只用了加速度，方向判别做不了。
+   硬件阶段先用 `gyro_check.exe` 验证（见第 8 节），确认有响应后再补方向判别。
+2. **口令哈希是"快哈希"**：SHA-256 加盐抗暴力破解能力有限，生产应换 PBKDF2/Argon2；
+   另外还没有注册/改密接口。
+3. **没有用户管理界面**：新增采集对象要直接改 `users` 表。
+4. **`raw_samples` 按"行数 + 天数"清理**，不做降采样归档；长期多设备运行建议再加按小时聚合。
 5. **`sqlite3.c` 仍在仓库里**（9.4 MB）：为了让 `gcc 一行命令` 就能编，先留着；换 vcpkg/系统库后可以删。
 6. 模拟终端的"文件缺失/格式错"只会静默停止，页面上没有明确报错。
 
 ---
 
-## 10. 文件说明
+## 12. 文件说明
 
 | 文件 | 作用 |
 |---|---|
@@ -228,9 +328,13 @@ floor     : 已上楼 3 层，当前 4 层（每层 22 级）
 | `gait_algo.c/h` | **算法层**（台上/台下通用，可编进 STM32） |
 | `device_*`（在 `globals.c`） | 设备通道注册表 |
 | `audio_hint.c/h` | 事件 → 提示音（音色按事件区分） |
-| `db_manager.c` | SQLite 建表与读写（6 张表） |
-| `web_server.c` | HTTP 服务、Token 会话、`/api/ingest`、接口 |
-| `globals.c` / `global_vars.h` | `Device` 结构与全局状态 |
-| `index.html` / `terminal.html` | 监控页（设备列表/切换）/ 模拟端独立页 |
+| `crypto_sha256.c/h` | SHA-256 + 加盐口令记录 + 安全随机源 |
+| `db_manager.c` | SQLite 建表与读写（7 张表：含 `sessions`）、保留策略清理 |
+| `web_server.c` | HTTP 服务、Token 会话（持久化）、`/api/ingest`、接口 |
+| `globals.c` / `global_vars.h` | `Device` 结构与全局状态（含陀螺自检统计） |
+| `index.html` / `terminal.html` | 监控页（设备列表/切换/陀螺状态）/ 模拟端独立页 |
 | `tools/algo_check.c` | 算法回归与参数标定工具 |
+| `tools/gyro_check.c` | **陀螺有效性验证**（文件/stdin，可用于串口实时验证） |
+| `tools/selftest.c` | 自检：SHA-256 向量 + 口令哈希 + 步态算法（16 项） |
 | `docs/hardware-protocol.md` | **硬件对接协议**（STM32/ESP8266） |
+

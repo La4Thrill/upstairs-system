@@ -619,6 +619,7 @@ void* simulator_thread_func(void* arg) {
         d->gyro_buffer[d->buffer_index] = gyro_dps;
         d->dyn_buffer[d->buffer_index] = dyn_g;
         d->buffer_index = (d->buffer_index + 1) % DATA_BUFFER_SIZE;
+        device_note_gyro_locked(d, gyro_dps);   /* 陀螺有效性自检 */
 
         d->samples_total = (long long)t->lines;
         d->sent_lines = (int)t->lines;

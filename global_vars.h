@@ -72,6 +72,13 @@ typedef struct {
     char      last_hint[48];            // 最近提示音
     float     last_event_time;          // 最近事件时刻（该设备的模拟时间 s）
 
+    /* 陀螺有效性自检（见 docs/hardware-protocol.md：先验陀螺再谈方向判别） */
+    double    gyro_mean;                // 角速度模长均值（Welford）
+    double    gyro_m2;                  // 平方差累计
+    long long gyro_n;                   // 参与统计的样本数
+    float     gyro_std;                 // 角速度模长标准差（°/s）
+    bool      gyro_valid;               // 陀螺是否有实际转动（标准差过小视为无效）
+
     GaitState gait;                     // 步态/楼层算法状态
     pthread_mutex_t mutex;              // 设备级互斥锁
 } Device;
@@ -121,5 +128,14 @@ bool device_check_key(int idx, const char* key);
 void device_mark_seen(int idx);
 void device_reset_counters(int idx);
 int  device_count_used(void);
+
+/**
+ * @brief 记录一次角速度模长，维护均值/标准差（调用方需已持有 d->mutex）
+ *
+ * 判据：样本数 >= 200 且标准差 >= 0.5 °/s 认为陀螺"有实际转动"；
+ * 数据集里三轴角速度标准差 < 0.1 °/s，会判为无效——这正是硬件阶段
+ * 需要先排查的地方（见 docs/hardware-protocol.md）。
+ */
+void device_note_gyro_locked(Device* d, float gyro_dps);
 
 #endif // GLOBAL_VARS_H

@@ -2,6 +2,7 @@
 #include "db_manager.h"
 #include "cjson.h"
 #include "global_vars.h"
+#include "crypto_sha256.h"
 
 #ifdef _WIN32
 #include "pthread_compat.h"
@@ -19,6 +20,11 @@
 static sqlite3* g_db = NULL;
 static pthread_mutex_t g_db_mutex;
 static bool g_db_mutex_inited = false;
+
+/* 前置声明（init_database 里会用到，定义在文件后面的工具区） */
+static void db_lock(void);
+static void db_unlock(void);
+static void migrate_plaintext_passwords(void);
 
 int init_database(void) {
     if (!g_db_mutex_inited) {
@@ -85,6 +91,14 @@ int init_database(void) {
         " climbed_floors INTEGER NOT NULL,"
         " total_steps INTEGER NOT NULL);",
 
+        "CREATE TABLE IF NOT EXISTS sessions ("
+        " token TEXT PRIMARY KEY,"
+        " username TEXT NOT NULL,"
+        " role TEXT NOT NULL,"
+        " user_id INTEGER NOT NULL DEFAULT 0,"
+        " created_at INTEGER NOT NULL,"
+        " expires_at INTEGER NOT NULL);",
+
         "CREATE INDEX IF NOT EXISTS idx_raw_device_ts ON raw_samples(device_id, id);",
         "CREATE INDEX IF NOT EXISTS idx_snap_device_time ON progress_snapshots(device_id, created_at DESC);",
         "CREATE INDEX IF NOT EXISTS idx_event_device_time ON floor_events(device_id, created_at DESC);"
@@ -115,8 +129,50 @@ int init_database(void) {
         "('monitor1','monitor123','monitor',0,'监控人员1');";
     sqlite3_exec(g_db, seed_auth, NULL, NULL, NULL);
 
+    /* 把仍是明文的口令就地升级成加盐哈希（兼容旧库） */
+    migrate_plaintext_passwords();
+
     printf("[DB] Database ready (%s).\n", DB_PATH);
     return 0;
+}
+
+/* 旧库里的明文口令 → sha256$盐$摘要；已哈希的行不动 */
+static void migrate_plaintext_passwords(void) {
+    if (!g_db) {
+        return;
+    }
+
+    db_lock();
+    sqlite3_stmt* sel = NULL;
+    if (sqlite3_prepare_v2(g_db, "SELECT id, password FROM auth_accounts;", -1, &sel, NULL) != SQLITE_OK) {
+        db_unlock();
+        return;
+    }
+
+    int upgraded = 0;
+    while (sqlite3_step(sel) == SQLITE_ROW) {
+        int id = sqlite3_column_int(sel, 0);
+        const unsigned char* pw = sqlite3_column_text(sel, 1);
+        if (!pw || crypto_password_is_hashed((const char*)pw)) {
+            continue;
+        }
+
+        char record[192];
+        if (!crypto_password_record((const char*)pw, record, sizeof(record))) {
+            continue;
+        }
+
+        char sql[512];
+        snprintf(sql, sizeof(sql), "UPDATE auth_accounts SET password='%s' WHERE id=%d;", record, id);
+        sqlite3_exec(g_db, sql, NULL, NULL, NULL);
+        upgraded++;
+    }
+    sqlite3_finalize(sel);
+    db_unlock();
+
+    if (upgraded > 0) {
+        printf("[DB] %d 个明文口令已升级为加盐哈希\n", upgraded);
+    }
 }
 
 void cleanup_database(void) {
@@ -492,8 +548,8 @@ bool verify_login(const char* username, const char* password, AuthAccount* out_a
     }
 
     const char* sql =
-        "SELECT id, username, role, COALESCE(nickname,''), user_id "
-        "FROM auth_accounts WHERE username=? AND password=? LIMIT 1;";
+        "SELECT id, username, role, COALESCE(nickname,''), user_id, password "
+        "FROM auth_accounts WHERE username=? LIMIT 1;";
 
     db_lock();
     sqlite3_stmt* stmt = NULL;
@@ -502,20 +558,22 @@ bool verify_login(const char* username, const char* password, AuthAccount* out_a
         return false;
     }
     sqlite3_bind_text(stmt, 1, username, -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, 2, password, -1, SQLITE_TRANSIENT);
 
     bool ok = false;
     if (sqlite3_step(stmt) == SQLITE_ROW) {
         const unsigned char* u = sqlite3_column_text(stmt, 1);
         const unsigned char* r = sqlite3_column_text(stmt, 2);
         const unsigned char* n = sqlite3_column_text(stmt, 3);
+        const unsigned char* stored = sqlite3_column_text(stmt, 5);
 
-        out_account->id = sqlite3_column_int(stmt, 0);
-        out_account->user_id = sqlite3_column_int(stmt, 4);
-        snprintf(out_account->username, sizeof(out_account->username), "%s", u ? (const char*)u : "");
-        snprintf(out_account->role, sizeof(out_account->role), "%s", r ? (const char*)r : "user");
-        snprintf(out_account->nickname, sizeof(out_account->nickname), "%s", n ? (const char*)n : "");
-        ok = true;
+        if (stored && crypto_password_verify(password, (const char*)stored)) {
+            out_account->id = sqlite3_column_int(stmt, 0);
+            out_account->user_id = sqlite3_column_int(stmt, 4);
+            snprintf(out_account->username, sizeof(out_account->username), "%s", u ? (const char*)u : "");
+            snprintf(out_account->role, sizeof(out_account->role), "%s", r ? (const char*)r : "user");
+            snprintf(out_account->nickname, sizeof(out_account->nickname), "%s", n ? (const char*)n : "");
+            ok = true;
+        }
     }
     sqlite3_finalize(stmt);
     db_unlock();
@@ -581,4 +639,206 @@ int db_init(void) {
 
 void db_close(void) {
     cleanup_database();
+}
+
+/* ---------------- 会话持久化 ---------------- */
+
+bool db_session_create(const char* token, const char* username, const char* role,
+                       int user_id, int ttl_seconds) {
+    if (!g_db || !token || !username || !role) {
+        return false;
+    }
+
+    const char* sql =
+        "INSERT OR REPLACE INTO sessions(token,username,role,user_id,created_at,expires_at) "
+        "VALUES(?,?,?,?,?,?);";
+
+    time_t now = time(NULL);
+    db_lock();
+    sqlite3_stmt* stmt = NULL;
+    int rc = sqlite3_prepare_v2(g_db, sql, -1, &stmt, NULL);
+    if (rc == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, token, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 2, username, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 3, role, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int(stmt, 4, user_id);
+        sqlite3_bind_int64(stmt, 5, (sqlite3_int64)now);
+        sqlite3_bind_int64(stmt, 6, (sqlite3_int64)(now + ttl_seconds));
+        rc = sqlite3_step(stmt);
+        sqlite3_finalize(stmt);
+    }
+    db_unlock();
+    return rc == SQLITE_DONE;
+}
+
+bool db_session_lookup(const char* token, char* out_username, size_t un,
+                       char* out_role, size_t rn, int* out_user_id) {
+    if (!g_db || !token || !token[0]) {
+        return false;
+    }
+
+    const char* sql = "SELECT username, role, user_id, expires_at FROM sessions WHERE token=? LIMIT 1;";
+
+    time_t now = time(NULL);
+    bool ok = false;
+
+    db_lock();
+    sqlite3_stmt* stmt = NULL;
+    if (sqlite3_prepare_v2(g_db, sql, -1, &stmt, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, token, -1, SQLITE_TRANSIENT);
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            time_t expires = (time_t)sqlite3_column_int64(stmt, 3);
+            if (expires > now) {
+                if (out_username) {
+                    const unsigned char* u = sqlite3_column_text(stmt, 0);
+                    snprintf(out_username, un, "%s", u ? (const char*)u : "");
+                }
+                if (out_role) {
+                    const unsigned char* r = sqlite3_column_text(stmt, 1);
+                    snprintf(out_role, rn, "%s", r ? (const char*)r : "user");
+                }
+                if (out_user_id) {
+                    *out_user_id = sqlite3_column_int(stmt, 2);
+                }
+                ok = true;
+            }
+        }
+        sqlite3_finalize(stmt);
+    }
+    db_unlock();
+
+    if (!ok) {
+        db_session_delete(token);   /* 过期或不存在：顺手清掉 */
+    }
+    return ok;
+}
+
+bool db_session_delete(const char* token) {
+    if (!g_db || !token) {
+        return false;
+    }
+
+    db_lock();
+    sqlite3_stmt* stmt = NULL;
+    int rc = sqlite3_prepare_v2(g_db, "DELETE FROM sessions WHERE token=?;", -1, &stmt, NULL);
+    if (rc == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, token, -1, SQLITE_TRANSIENT);
+        rc = sqlite3_step(stmt);
+        sqlite3_finalize(stmt);
+    }
+    db_unlock();
+    return rc == SQLITE_DONE;
+}
+
+int db_session_purge_expired(void) {
+    if (!g_db) {
+        return 0;
+    }
+
+    db_lock();
+    sqlite3_exec(g_db, "DELETE FROM sessions WHERE expires_at <= strftime('%s','now');", NULL, NULL, NULL);
+    int changes = sqlite3_changes(g_db);
+    db_unlock();
+    return changes;
+}
+
+/* ---------------- 数据保留策略 ---------------- */
+
+int db_raw_count(const char* device_id) {
+    if (!g_db) {
+        return 0;
+    }
+
+    db_lock();
+    sqlite3_stmt* stmt = NULL;
+    int n = 0;
+    const char* sql_dev = "SELECT COUNT(*) FROM raw_samples WHERE device_id=?;";
+    const char* sql_all = "SELECT COUNT(*) FROM raw_samples;";
+
+    if (sqlite3_prepare_v2(g_db, (device_id && device_id[0]) ? sql_dev : sql_all, -1, &stmt, NULL) == SQLITE_OK) {
+        if (device_id && device_id[0]) {
+            sqlite3_bind_text(stmt, 1, device_id, -1, SQLITE_TRANSIENT);
+        }
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            n = sqlite3_column_int(stmt, 0);
+        }
+        sqlite3_finalize(stmt);
+    }
+    db_unlock();
+    return n;
+}
+
+void db_run_retention(int keep_rows, int keep_days, RetentionStats* out_stats) {
+    RetentionStats stats = {0, 0, 0, 0};
+
+    if (keep_rows <= 0) {
+        keep_rows = 20000;      /* 每台设备保留 20000 行 ≈ 6.7 分钟 @50Hz */
+    }
+    if (keep_days <= 0) {
+        keep_days = 7;
+    }
+
+    if (!g_db) {
+        if (out_stats) {
+            *out_stats = stats;
+        }
+        return;
+    }
+
+    db_lock();
+
+    /* 1) 过期会话 */
+    sqlite3_exec(g_db, "DELETE FROM sessions WHERE expires_at <= strftime('%s','now');", NULL, NULL, NULL);
+    stats.sessions_deleted = sqlite3_changes(g_db);
+
+    /* 2) 超期的原始样本/快照/事件 */
+    char sql[512];
+    snprintf(sql, sizeof(sql),
+             "DELETE FROM raw_samples WHERE ts < (strftime('%%s','now') - %d);", keep_days * 86400);
+    sqlite3_exec(g_db, sql, NULL, NULL, NULL);
+    stats.raw_deleted += sqlite3_changes(g_db);
+
+    snprintf(sql, sizeof(sql),
+             "DELETE FROM progress_snapshots WHERE created_at < (strftime('%%s','now') - %d);", keep_days * 86400);
+    sqlite3_exec(g_db, sql, NULL, NULL, NULL);
+    stats.snapshots_deleted += sqlite3_changes(g_db);
+
+    snprintf(sql, sizeof(sql),
+             "DELETE FROM floor_events WHERE created_at < (strftime('%%s','now') - %d);", keep_days * 86400);
+    sqlite3_exec(g_db, sql, NULL, NULL, NULL);
+    stats.events_deleted += sqlite3_changes(g_db);
+
+    /* 3) 每台设备只保留最近 keep_rows 行原始样本 */
+    sqlite3_stmt* devs = NULL;
+    if (sqlite3_prepare_v2(g_db, "SELECT DISTINCT device_id FROM raw_samples;", -1, &devs, NULL) == SQLITE_OK) {
+        char ids[64][64];
+        int n_ids = 0;
+        while (sqlite3_step(devs) == SQLITE_ROW && n_ids < 64) {
+            const unsigned char* d = sqlite3_column_text(devs, 0);
+            snprintf(ids[n_ids], sizeof(ids[n_ids]), "%s", d ? (const char*)d : "");
+            n_ids++;
+        }
+        sqlite3_finalize(devs);
+
+        for (int i = 0; i < n_ids; ++i) {
+            const char* del =
+                "DELETE FROM raw_samples WHERE device_id=? AND id NOT IN ("
+                " SELECT id FROM raw_samples WHERE device_id=? ORDER BY id DESC LIMIT ?);";
+            sqlite3_stmt* st = NULL;
+            if (sqlite3_prepare_v2(g_db, del, -1, &st, NULL) == SQLITE_OK) {
+                sqlite3_bind_text(st, 1, ids[i], -1, SQLITE_TRANSIENT);
+                sqlite3_bind_text(st, 2, ids[i], -1, SQLITE_TRANSIENT);
+                sqlite3_bind_int(st, 3, keep_rows);
+                sqlite3_step(st);
+                sqlite3_finalize(st);
+                stats.raw_deleted += sqlite3_changes(g_db);
+            }
+        }
+    }
+
+    db_unlock();
+
+    if (out_stats) {
+        *out_stats = stats;
+    }
 }

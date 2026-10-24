@@ -55,6 +55,30 @@ bool verify_login(const char* username, const char* password, AuthAccount* out_a
 char* get_collectors_json(void);
 int  db_user_id_by_name(const char* username);
 
+/* ---- 会话（持久化到数据库，重启不掉线） ---- */
+bool db_session_create(const char* token, const char* username, const char* role,
+                       int user_id, int ttl_seconds);
+bool db_session_lookup(const char* token, char* out_username, size_t un,
+                       char* out_role, size_t rn, int* out_user_id);
+bool db_session_delete(const char* token);
+int  db_session_purge_expired(void);
+
+/* ---- 数据保留策略 ---- */
+typedef struct {
+    int raw_deleted;
+    int snapshots_deleted;
+    int events_deleted;
+    int sessions_deleted;
+} RetentionStats;
+
+/**
+ * @brief 清理过期/超量数据
+ * @param keep_rows  每台设备保留的原始样本行数（<=0 用默认）
+ * @param keep_days  保留天数（<=0 用默认）
+ */
+void db_run_retention(int keep_rows, int keep_days, RetentionStats* out_stats);
+int  db_raw_count(const char* device_id);
+
 // 兼容旧代码命名
 int db_init(void);
 void db_close(void);

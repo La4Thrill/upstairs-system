@@ -156,6 +156,7 @@
         </div>
         <div>
             模拟终端：<span id="run-status" class="status-stopped">已停止</span>
+            <button class="btn-ghost" style="margin-left:12px;padding:6px 10px;font-size:12px;" onclick="logout()">退出登录</button>
         </div>
     </div>
 </div>
@@ -220,7 +221,9 @@
         <span style="margin-left:12px;">每层台阶数：<b id="spf-v">--</b></span>
         <span style="margin-left:12px;">采样率：<b id="fs-v">--</b> Hz</span>
         <span style="margin-left:12px;">阈值：<b id="thr-v">--</b> g</span>
+        <span style="margin-left:12px;">陀螺：<b id="gyro-v">--</b></span>
     </div>
+    <div class="hint" id="gyro-hint" style="margin-top:6px;"></div>
 </div>
 
 <div class="panel hidden" id="wave-panel">
@@ -402,8 +405,17 @@
         fetchHistory();
     }
 
-    async function sendCommand(cmd) {
-        const res = await apiFetch('/' + cmd, { method: 'POST' });
+    async function logout() {
+        try {
+            await apiFetch('/api/logout', { method: 'POST' });
+        } catch (e) { /* 忽略 */ }
+        authToken = '';
+        currentRole = '';
+        currentDevice = '';
+        location.reload();
+    }
+
+    async function sendCommand(cmd) {        const res = await apiFetch('/' + cmd, { method: 'POST' });
         if (!res.ok) {
             const t = await res.text();
             setMsg('命令失败：' + t, true);
@@ -598,6 +610,23 @@
         document.getElementById('spf-v').textContent = data.steps_per_floor ?? '--';
         document.getElementById('fs-v').textContent = data.fs ?? '--';
         document.getElementById('thr-v').textContent = data.step_thr ? Number(data.step_thr).toFixed(2) : '--';
+
+        const gyroEl = document.getElementById('gyro-v');
+        const gyroHint = document.getElementById('gyro-hint');
+        const gstd = Number(data.gyro_std || 0);
+        if (!data.gyro_samples) {
+            gyroEl.textContent = '--';
+            gyroEl.style.color = '#6b7280';
+            gyroHint.textContent = '';
+        } else if (data.gyro_valid) {
+            gyroEl.textContent = `有效（σ=${gstd.toFixed(2)} °/s）`;
+            gyroEl.style.color = '#16a34a';
+            gyroHint.textContent = '陀螺有真实转动，可以做方向判别/平台转弯检测。';
+        } else {
+            gyroEl.textContent = `无效（σ=${gstd.toFixed(2)} °/s）`;
+            gyroEl.style.color = '#dc2626';
+            gyroHint.textContent = '陀螺近似常量偏置：当前只用加速度判层与计步，方向判别不可用。接真机后先用 gyro_check.exe 验证陀螺。';
+        }
 
         drawWave('accel-canvas', data.accel_wave || [], '#2563eb');
         drawWave('gyro-canvas', data.gyro_wave || [], '#dc2626');

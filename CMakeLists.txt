@@ -12,6 +12,7 @@ add_executable(server
         web_server.c
         simulator.c
         db_manager.c
+        crypto_sha256.c
         audio_hint.c
         cjson.c
         sqlite3.c
@@ -35,6 +36,16 @@ else()
             m
     )
 endif()
+
+# ---------- 开发/测试工具 ----------
+add_executable(algo_check tools/algo_check.c)
+target_link_libraries(algo_check PRIVATE gait_algo m)
+
+add_executable(gyro_check tools/gyro_check.c)
+target_link_libraries(gyro_check PRIVATE m)
+
+add_executable(selftest tools/selftest.c crypto_sha256.c)
+target_link_libraries(selftest PRIVATE gait_algo m)
 
 # 可选：启用详细输出便于调试
 set(CMAKE_VERBOSE_MAKEFILE ON)

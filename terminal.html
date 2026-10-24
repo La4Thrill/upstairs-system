@@ -188,6 +188,7 @@
                 <div class="item"><div class="k">当前状态</div><div class="v" id="pstate">--</div></div>
                 <div class="item"><div class="k">样本行数</div><div class="v" id="lines">--</div></div>
                 <div class="item"><div class="k">最近事件</div><div class="v" id="lastev" style="font-size:12px;">--</div></div>
+                <div class="item"><div class="k">陀螺</div><div class="v" id="gyro" style="font-size:13px;">--</div></div>
             </div>
             <h4 style="margin-top:12px;">实时日志</h4>
             <textarea id="log" readonly></textarea>
@@ -326,6 +327,16 @@
             document.getElementById('pstate').textContent = data.on_platform ? '平台' : '行进';
             document.getElementById('lines').textContent = data.file_lines ?? '--';
             document.getElementById('lastev').textContent = data.last_event || '--';
+            const gEl = document.getElementById('gyro');
+            if (!data.gyro_samples) {
+                gEl.textContent = '--';
+            } else if (data.gyro_valid) {
+                gEl.textContent = `有效 ${Number(data.gyro_std || 0).toFixed(2)}°/s`;
+                gEl.style.color = '#22c55e';
+            } else {
+                gEl.textContent = `无效 ${Number(data.gyro_std || 0).toFixed(2)}°/s`;
+                gEl.style.color = '#ef4444';
+            }
 
             const stateEl = document.getElementById('runState');
             if (data.running) {

@@ -5,6 +5,7 @@
 #include <time.h>
 #include <stdbool.h>
 #include <ctype.h>
+#include <math.h>
 
 // ==========================================================
 // 🌍 全局变量定义
@@ -48,6 +49,11 @@ static void device_zero_state(Device* d) {
     snprintf(d->last_event, sizeof(d->last_event), "none");
     snprintf(d->last_hint, sizeof(d->last_hint), "none");
     d->last_event_time = 0.0f;
+    d->gyro_mean = 0.0;
+    d->gyro_m2 = 0.0;
+    d->gyro_n = 0;
+    d->gyro_std = 0.0f;
+    d->gyro_valid = false;
     gait_reset(&d->gait);
 }
 
@@ -208,4 +214,35 @@ int device_count_used(void) {
     }
     pthread_mutex_unlock(&g_registry_mutex);
     return n;
+}
+
+/* ==========================================================
+ *  陀螺有效性自检
+ * ----------------------------------------------------------
+ *  Welford 在线均值/方差，O(1) 内存，可在 STM32 上跑同一套判据。
+ *  判据：n >= 200 且 std >= 0.5 °/s → 有效。
+ *  - 数据集（LSM9DS0 静止偏置）：std ≈ 0.05~0.07 °/s → 无效
+ *  - 真机晃动：std 通常 > 5 °/s → 有效
+ * ========================================================== */
+#define GYRO_STD_MIN_VALID   0.5f
+#define GYRO_SAMPLES_MIN     200
+
+void device_note_gyro_locked(Device* d, float gyro_dps) {
+    if (!d) {
+        return;
+    }
+
+    d->gyro_n++;
+    double delta = (double)gyro_dps - d->gyro_mean;
+    d->gyro_mean += delta / (double)d->gyro_n;
+    d->gyro_m2 += delta * ((double)gyro_dps - d->gyro_mean);
+
+    if (d->gyro_n > 1) {
+        double var = d->gyro_m2 / (double)(d->gyro_n - 1);
+        d->gyro_std = (float)(var > 0.0 ? (var < 1e300 ? sqrt(var) : 0.0) : 0.0);
+    } else {
+        d->gyro_std = 0.0f;
+    }
+
+    d->gyro_valid = (d->gyro_n >= GYRO_SAMPLES_MIN && d->gyro_std >= GYRO_STD_MIN_VALID);
 }
