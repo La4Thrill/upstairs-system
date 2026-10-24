@@ -4,6 +4,7 @@
 数据：`上三层楼数据.txt`（2488 样本 @ **50 Hz**，约 49.8 s，上楼 3 层）
 
 > 硬件阶段对接说明见 **[docs/hardware-protocol.md](docs/hardware-protocol.md)**（STM32 上报协议、鉴权、端侧参考代码）。
+> **第一次拿到板子怎么烧、怎么接、怎么让数据进系统**见 **[docs/firmware-quickstart.md](docs/firmware-quickstart.md)**。
 > 数据集是怎么采集的（手持姿势、传感器固定、轴向）见 **[docs/mounting.md](docs/mounting.md)**。
 
 ---
@@ -424,6 +425,8 @@ python tools\replay_ingest.py "D:\数据文件\数据文件\九轴数据文件\�
 | `testdata/` | 老师给的负样本数据 + `expect.txt` 期望值清单 |
 | `docs/hardware-protocol.md` | **硬件对接协议**（STM32/ESP8266）+ LSM9DS0 配置对照 |
 | `docs/mounting.md` | **采集姿势与传感器固定方式**：ReadMe 图 1~4 原图、模块丝印、从数据反推的轴向、上板检查清单 |
+| `docs/firmware-quickstart.md` | **硬件阶段上手**：烧录操作、五步上手路径、寄存器配置（0x6A/0x1D）、端侧代码骨架、上报三方案 |
+| `tools/serial_ingest.py` | **串口 → `/api/ingest` 桥**：端侧只需 `printf` 六个整数，不用 WiFi 也能进系统 |
 | `docs/img/` | 上面几份文档用到的图片 |
 
 ---

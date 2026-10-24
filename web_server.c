@@ -675,6 +675,7 @@ static void handle_ingest(int client_sock, const char* req_body, const char* dev
     spm_now = d->speed_per_minute;
     samples_now = d->samples_total;
     int half_now = d->half_flights;
+    int mid_now = d->mid_platforms;
 
     pthread_mutex_unlock(&d->mutex);
 
@@ -709,6 +710,7 @@ static void handle_ingest(int client_sock, const char* req_body, const char* dev
     cJSON_AddNumberToObject(root, "steps", steps_now);
     cJSON_AddNumberToObject(root, "speed", spm_now);
     cJSON_AddNumberToObject(root, "half_flights", half_now);
+    cJSON_AddNumberToObject(root, "mid_platforms", mid_now);
 
     send_json_response(client_sock, "200 OK", root);
     cJSON_Delete(root);
