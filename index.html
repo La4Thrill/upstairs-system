@@ -32,7 +32,7 @@
 
         .panel {
             width: 100%;
-            max-width: 1080px;
+            max-width: 1120px;
             background: var(--card);
             border: 1px solid var(--border);
             border-radius: 10px;
@@ -62,6 +62,7 @@
         .btn-start { background: var(--ok); }
         .btn-stop { background: var(--danger); }
         .btn-reset { background: var(--warn); }
+        .btn-ghost { background: #6b7280; }
 
         .hidden { display: none; }
 
@@ -74,13 +75,15 @@
             background: #eef2ff;
             color: #3730a3;
         }
+        .badge.online { background: #dcfce7; color: #166534; }
+        .badge.offline { background: #f3f4f6; color: #6b7280; }
 
         .status-running { color: var(--ok); font-weight: bold; }
         .status-stopped { color: var(--danger); font-weight: bold; }
 
         .metrics {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
             gap: 10px;
         }
         .metric {
@@ -113,10 +116,13 @@
         }
 
         table { width: 100%; border-collapse: collapse; }
-        th, td { padding: 8px; border-bottom: 1px solid var(--border); text-align: left; }
+        th, td { padding: 8px; border-bottom: 1px solid var(--border); text-align: left; font-size: 13px; }
         th { background: #f9fafb; }
+        tr.selected { background: #eff6ff; }
 
         #msg { min-height: 20px; color: #374151; font-size: 13px; }
+
+        .hint { font-size: 12px; color: #6b7280; }
 
         @media (max-width: 900px) {
             .wave-grid { grid-template-columns: 1fr; }
@@ -138,7 +144,7 @@
         <button class="btn-primary" onclick="login()">登录</button>
     </div>
     <div style="margin-top:10px;font-size:13px;color:#4b5563;">
-        默认账号：admin/admin123，monitor1/monitor123，collector1/collector123
+        默认账号：admin/admin123（管理员）、monitor1/monitor123（监控）、collector1/collector123（采集对象）
     </div>
 </div>
 
@@ -149,30 +155,57 @@
             <span class="badge" id="login-role">-</span>
         </div>
         <div>
-            系统状态：<span id="run-status" class="status-stopped">已停止</span>
+            模拟终端：<span id="run-status" class="status-stopped">已停止</span>
         </div>
     </div>
+</div>
+
+<div class="panel hidden" id="devices-panel">
+    <div class="row" style="justify-content: space-between;">
+        <h3 style="margin:0;">设备 / 采集通道</h3>
+        <div class="row">
+            <label class="hint">当前查看：</label>
+            <select id="device-select" onchange="onDeviceChange()"></select>
+            <button class="btn-ghost" onclick="refreshDevices()">刷新设备</button>
+        </div>
+    </div>
+    <table style="margin-top:10px;">
+        <thead>
+        <tr>
+            <th>设备ID</th><th>来源</th><th>采集对象</th><th>状态</th>
+            <th>楼层</th><th>台阶</th><th>步频</th><th>最近上报</th>
+        </tr>
+        </thead>
+        <tbody id="devices-body"></tbody>
+    </table>
 </div>
 
 <div class="panel hidden" id="sim-panel">
     <h3>模拟端控制台</h3>
     <div class="row">
-        <label>加载文件场景：</label>
-        <select id="profile-select">
-            <option value="upstairs3">上三层楼数据（data1，上楼场景）</option>
-            <option value="dailywalk">日常行走数据（data2，对照场景，只计步不判层）</option>
-            <option value="mixed">混合场景（data1+data2，只计步不判层）</option>
+        <label>目标终端：</label>
+        <select id="target-select">
+            <option value="all">全部终端</option>
         </select>
-        <label style="font-size:13px;"><input type="checkbox" id="loop-check" /> 循环发送</label>
+        <label>加载场景：</label>
+        <select id="profile-select">
+            <option value="upstairs3">上三层楼数据（判层）</option>
+            <option value="dailywalk">日常行走数据（只计步）</option>
+            <option value="mixed">混合场景（只计步）</option>
+        </select>
+        <label class="hint"><input type="checkbox" id="loop-check" /> 循环发送</label>
         <button class="btn-primary" onclick="loadProfile()">加载文件</button>
         <button class="btn-start" onclick="sendCommand('start')">开始</button>
         <button class="btn-stop" onclick="sendCommand('stop')">停止</button>
         <button class="btn-reset" onclick="sendCommand('reset')">重置</button>
     </div>
+    <div class="hint" style="margin-top:8px;">
+        SIM-01 默认"上三层楼"（判层），SIM-02 默认"日常行走"（对照，只计步）。两台终端各自独立运行、独立计数。
+    </div>
 </div>
 
 <div class="panel hidden" id="metrics-panel">
-    <h3>爬楼结果</h3>
+    <h3>爬楼结果 <span class="hint" id="metric-device"></span></h3>
     <div class="metrics">
         <div class="metric"><div class="k">当前楼层</div><div class="v" id="floor-v">--</div></div>
         <div class="metric"><div class="k">已爬楼层</div><div class="v" id="climbed-v">--</div></div>
@@ -184,8 +217,9 @@
     <div style="margin-top:10px;font-size:13px;color:#4b5563;">
         最近事件：<b id="last-event">--</b>
         <span style="margin-left:12px;">提示音：<b id="last-hint">--</b></span>
-        <span style="margin-left:12px;">每层台阶数（标定值）：<b id="spf-v">--</b></span>
+        <span style="margin-left:12px;">每层台阶数：<b id="spf-v">--</b></span>
         <span style="margin-left:12px;">采样率：<b id="fs-v">--</b> Hz</span>
+        <span style="margin-left:12px;">阈值：<b id="thr-v">--</b> g</span>
     </div>
 </div>
 
@@ -201,14 +235,22 @@
             <canvas id="gyro-canvas" width="500" height="220"></canvas>
         </div>
         <div class="wave-card" style="grid-column: 1 / -1;">
-            <div>去重力后的动态加速度（g，算法输入，红色虚线为台阶判定阈值）</div>
+            <div>去重力后的动态加速度（g，算法输入；红色虚线为台阶判定阈值）</div>
             <canvas id="dyn-canvas" width="1000" height="220"></canvas>
+        </div>
+        <div class="wave-card" style="grid-column: 1 / -1;">
+            <div class="row" style="justify-content: space-between;">
+                <span>历史原始数据回看（accel x / y / z，来自数据库 raw_samples）</span>
+                <button class="btn-ghost" onclick="loadSamples()">回看最近 500 个样本</button>
+            </div>
+            <canvas id="raw-canvas" width="1000" height="220"></canvas>
+            <div class="hint" id="raw-info"></div>
         </div>
     </div>
 </div>
 
 <div class="panel hidden" id="collectors-panel">
-    <h3>采集对象列表（支持多个用户）</h3>
+    <h3>采集对象</h3>
     <table>
         <thead><tr><th>ID</th><th>用户名</th><th>昵称</th></tr></thead>
         <tbody id="collectors-body"><tr><td colspan="3">加载中...</td></tr></tbody>
@@ -216,10 +258,10 @@
 </div>
 
 <div class="panel hidden" id="history-panel">
-    <h3>最近历史记录</h3>
+    <h3>历史记录（当前设备）</h3>
     <table>
-        <thead><tr><th>时间</th><th>楼层</th><th>步数</th><th>速度</th></tr></thead>
-        <tbody id="history-body"><tr><td colspan="4">加载中...</td></tr></tbody>
+        <thead><tr><th>时间</th><th>设备</th><th>楼层</th><th>已爬</th><th>台阶</th><th>步频</th></tr></thead>
+        <tbody id="history-body"><tr><td colspan="6">加载中...</td></tr></tbody>
     </table>
 </div>
 
@@ -228,6 +270,8 @@
 <script>
     let authToken = '';
     let currentRole = '';
+    let currentDevice = '';
+    let devices = [];
 
     function setMsg(text, isErr = false) {
         const el = document.getElementById('msg');
@@ -266,21 +310,96 @@
         document.getElementById('login-role').textContent = data.role;
 
         document.getElementById('login-panel').classList.add('hidden');
-        document.getElementById('app-panel').classList.remove('hidden');
-        document.getElementById('metrics-panel').classList.remove('hidden');
-        document.getElementById('wave-panel').classList.remove('hidden');
-        document.getElementById('history-panel').classList.remove('hidden');
-        document.getElementById('collectors-panel').classList.remove('hidden');
+        ['app-panel', 'devices-panel', 'metrics-panel', 'wave-panel', 'history-panel', 'collectors-panel']
+            .forEach(id => document.getElementById(id).classList.remove('hidden'));
 
         if (currentRole === 'admin' || currentRole === 'monitor') {
             document.getElementById('sim-panel').classList.remove('hidden');
         }
 
         setMsg(`登录成功，角色：${data.role}`);
-        await fetchStatus();
+        await refreshDevices();
         await fetchCollectors();
+        await fetchStatus();
         await fetchHistory();
         startAutoRefresh();
+    }
+
+    async function refreshDevices() {
+        const res = await apiFetch('/api/devices');
+        if (!res.ok) {
+            setMsg('获取设备列表失败', true);
+            return;
+        }
+
+        const data = await res.json();
+        devices = data.devices || [];
+
+        const sel = document.getElementById('device-select');
+        const prev = currentDevice || sel.value;
+        sel.innerHTML = devices.map(d =>
+            `<option value="${d.device_id}">${d.device_id} · ${d.username || d.name || ''}${d.stair_mode ? ' · 判层' : ' · 只计步'}</option>`
+        ).join('');
+
+        if (devices.length > 0) {
+            const keep = devices.some(d => d.device_id === prev);
+            sel.value = keep ? prev : devices[0].device_id;
+            currentDevice = sel.value;
+        } else {
+            currentDevice = '';
+        }
+
+        const tsel = document.getElementById('target-select');
+        if (tsel) {
+            const prevTarget = tsel.value;
+            tsel.innerHTML = '<option value="all">全部终端</option>' +
+                devices.filter(d => d.source === 'sim')
+                       .map(d => `<option value="${d.device_id}">${d.device_id}</option>`).join('');
+            if (prevTarget && Array.from(tsel.options).some(o => o.value === prevTarget)) {
+                tsel.value = prevTarget;
+            }
+        }
+
+        renderDevicesTable();
+    }
+
+    function renderDevicesTable() {
+        const tbody = document.getElementById('devices-body');
+        if (!devices.length) {
+            tbody.innerHTML = '<tr><td colspan="8">暂无设备</td></tr>';
+            return;
+        }
+
+        tbody.innerHTML = devices.map(d => {
+            const online = d.online ? '<span class="badge online">在线</span>' : '<span class="badge offline">离线</span>';
+            const last = d.last_seen ? new Date(d.last_seen * 1000).toLocaleTimeString() : '--';
+            const cls = d.device_id === currentDevice ? ' class="selected"' : '';
+            return `<tr${cls} onclick="selectDevice('${d.device_id}')" style="cursor:pointer">
+                <td>${d.device_id}</td>
+                <td>${d.source === 'sim' ? '模拟终端' : '真实设备'}</td>
+                <td>${d.username || '-'}</td>
+                <td>${online}</td>
+                <td>${d.current_floor}</td>
+                <td>${d.steps}</td>
+                <td>${Number(d.speed || 0).toFixed(1)}</td>
+                <td>${last}</td>
+            </tr>`;
+        }).join('');
+    }
+
+    function selectDevice(id) {
+        currentDevice = id;
+        document.getElementById('device-select').value = id;
+        renderDevicesTable();
+        fetchStatus();
+        fetchHistory();
+    }
+
+    function onDeviceChange() {
+        currentDevice = document.getElementById('device-select').value;
+        renderDevicesTable();
+        fetchStatus();
+        fetchHistory();
     }
 
     async function sendCommand(cmd) {
@@ -297,10 +416,12 @@
     async function loadProfile() {
         const profile = document.getElementById('profile-select').value;
         const loop = document.getElementById('loop-check').checked;
+        const target = document.getElementById('target-select').value;
+
         const res = await apiFetch('/api/sim/load', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ profile, loop })
+            body: JSON.stringify({ profile, loop, device_id: target })
         });
 
         if (!res.ok) {
@@ -310,7 +431,8 @@
         }
 
         const data = await res.json();
-        setMsg(`已加载场景：${data.profile}（${data.stair_mode ? '判断楼层' : '只计步'}，${data.loop ? '循环' : '单次'}发送）`);
+        setMsg(`已加载场景：${data.profile} → ${data.device_id}（${data.stair_mode ? '判断楼层' : '只计步'}，${data.loop ? '循环' : '单次'}发送）`);
+        await refreshDevices();
         await fetchStatus();
     }
 
@@ -353,20 +475,18 @@
         ctx.stroke();
     }
 
-    // 动态加速度：固定量程 + 台阶阈值线，便于判断"算法是否抓到了台阶"
+    // 动态加速度：固定量程 + 台阶阈值线
     function drawDynWave(canvasId, values, threshold) {
         const canvas = document.getElementById(canvasId);
         if (!canvas) return;
         const ctx = canvas.getContext('2d');
         const w = canvas.width;
         const h = canvas.height;
-        const yMax = 0.6;   // g
+        const yMax = 0.6;
 
         const toY = (v) => h / 2 - (v / yMax) * (h / 2 - 6);
 
         ctx.clearRect(0, 0, w, h);
-
-        // 零线
         ctx.strokeStyle = '#e5e7eb';
         ctx.lineWidth = 1;
         ctx.beginPath();
@@ -374,7 +494,6 @@
         ctx.lineTo(w, toY(0));
         ctx.stroke();
 
-        // 阈值线
         if (threshold) {
             ctx.strokeStyle = '#fca5a5';
             ctx.setLineDash([6, 4]);
@@ -402,8 +521,59 @@
         ctx.stroke();
     }
 
+    // 三轴原始数据（来自数据库）
+    function drawThreeAxis(canvasId, ax, ay, az) {
+        const canvas = document.getElementById(canvasId);
+        if (!canvas) return;
+        const ctx = canvas.getContext('2d');
+        const w = canvas.width;
+        const h = canvas.height;
+
+        ctx.clearRect(0, 0, w, h);
+
+        const all = [].concat(ax || [], ay || [], az || []);
+        if (!all.length) {
+            ctx.fillStyle = '#9ca3af';
+            ctx.font = '14px Segoe UI';
+            ctx.fillText('点击上方按钮，从数据库回看原始样本', 20, h / 2);
+            return;
+        }
+
+        let min = Math.min(...all);
+        let max = Math.max(...all);
+        const range = Math.max(max - min, 1);
+        const n = Math.max(ax.length, 1);
+        const stepX = w / Math.max(n - 1, 1);
+        const toY = (v) => h - 8 - ((v - min) / range) * (h - 16);
+
+        const series = [
+            { data: ax, color: '#2563eb', name: 'ax' },
+            { data: ay, color: '#16a34a', name: 'ay' },
+            { data: az, color: '#dc2626', name: 'az' }
+        ];
+
+        for (const s of series) {
+            ctx.strokeStyle = s.color;
+            ctx.lineWidth = 1.5;
+            ctx.beginPath();
+            s.data.forEach((v, i) => {
+                const x = i * stepX;
+                const y = toY(v);
+                if (i === 0) ctx.moveTo(x, y);
+                else ctx.lineTo(x, y);
+            });
+            ctx.stroke();
+        }
+
+        ctx.fillStyle = '#6b7280';
+        ctx.font = '12px Segoe UI';
+        ctx.fillText('ax(蓝) ay(绿) az(红)  单位：原始 LSB', 10, 16);
+    }
+
     async function fetchStatus() {
-        const res = await apiFetch('/api/status?t=' + Date.now());
+        if (!currentDevice) return;
+
+        const res = await apiFetch('/api/status?device_id=' + encodeURIComponent(currentDevice) + '&t=' + Date.now());
         if (!res.ok) {
             setMsg('获取状态失败', true);
             return;
@@ -413,6 +583,9 @@
 
         document.getElementById('run-status').textContent = data.running ? '运行中' : '已停止';
         document.getElementById('run-status').className = data.running ? 'status-running' : 'status-stopped';
+
+        document.getElementById('metric-device').textContent =
+            `（${data.device_id} · ${data.source === 'sim' ? '模拟终端' : '真实设备'} · ${data.stair_mode ? '判层' : '只计步'}）`;
 
         document.getElementById('floor-v').textContent = data.current_floor ?? '--';
         document.getElementById('climbed-v').textContent = data.climbed_floors ?? '--';
@@ -424,32 +597,47 @@
         document.getElementById('last-hint').textContent = data.last_hint || '--';
         document.getElementById('spf-v').textContent = data.steps_per_floor ?? '--';
         document.getElementById('fs-v').textContent = data.fs ?? '--';
-
-        if (data.profile) {
-            const sel = document.getElementById('profile-select');
-            if (sel && sel.querySelector(`option[value="${data.profile}"]`)) {
-                sel.value = data.profile;
-            }
-        }
+        document.getElementById('thr-v').textContent = data.step_thr ? Number(data.step_thr).toFixed(2) : '--';
 
         drawWave('accel-canvas', data.accel_wave || [], '#2563eb');
         drawWave('gyro-canvas', data.gyro_wave || [], '#dc2626');
-        drawDynWave('dyn-canvas', data.dyn_wave || [], 0.18);
+        drawDynWave('dyn-canvas', data.dyn_wave || [], data.step_thr || 0.18);
+    }
+
+    async function loadSamples() {
+        if (!currentDevice) return;
+        const res = await apiFetch(`/api/samples?device_id=${encodeURIComponent(currentDevice)}&limit=500`);
+        if (!res.ok) {
+            setMsg('获取原始数据失败', true);
+            return;
+        }
+        const data = await res.json();
+        drawThreeAxis('raw-canvas', data.ax || [], data.ay || [], data.az || []);
+        document.getElementById('raw-info').textContent =
+            `共 ${data.count || 0} 个样本（raw_samples 表，设备 ${currentDevice}）`;
     }
 
     async function fetchHistory() {
-        const res = await apiFetch('/api/history');
+        if (!currentDevice) return;
+        const res = await apiFetch('/api/history?device_id=' + encodeURIComponent(currentDevice) + '&limit=20');
         if (!res.ok) return;
 
         const list = await res.json();
         const tbody = document.getElementById('history-body');
         if (!list || list.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="4">暂无历史</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="6">暂无历史</td></tr>';
             return;
         }
 
         tbody.innerHTML = list.map(item =>
-            `<tr><td>${item.time || ''}</td><td>${item.floor ?? '-'}</td><td>${item.step ?? '-'}</td><td>${Number(item.speed || 0).toFixed(2)}</td></tr>`
+            `<tr>
+                <td>${item.time || ''}</td>
+                <td>${item.device_id || ''}</td>
+                <td>${item.floor ?? '-'}</td>
+                <td>${item.climbed ?? '-'}</td>
+                <td>${item.step ?? '-'}</td>
+                <td>${Number(item.speed || 0).toFixed(1)}</td>
+            </tr>`
         ).join('');
     }
 
@@ -471,8 +659,8 @@
 
     function startAutoRefresh() {
         setInterval(fetchStatus, 1000);
+        setInterval(refreshDevices, 3000);
         setInterval(fetchHistory, 5000);
-        setInterval(fetchCollectors, 8000);
     }
 </script>
 </body>

@@ -21,8 +21,13 @@ Makefile
 
 # Databases and runtime files
 *.db
+*.db-wal
+*.db-shm
 *.sqlite
 *.pid
+
+# 临时脚本
+_check_*.js
 
 # Logs
 *.log

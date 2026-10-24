@@ -1,16 +1,15 @@
 /**
  * ============================================================
- *  simulator.c —— 模拟数据采集终端
+ *  simulator.c —— 模拟数据采集终端（多终端）
  *
- *  职责（对应课题"模拟终端"要求）：
- *    · 多文件顺序发送 / 循环发送
- *    · 发送数据计数（file_lines）
- *    · 开始 / 停止 / 重置
- *    · 按标称采样率（50Hz）推送样本
+ *  每个终端是一台独立"设备"：
+ *    SIM-01 / collector1（默认 upstairs3：上楼，判层）
+ *    SIM-02 / collector2（默认 dailywalk：日常行走，只计步）
  *
- *  算法（步态/楼层）不在本文件里硬编码，而是交给 gait_algo.c：
- *    原始 LSB → 台阶事件 → 半层/楼层事件 → 提示音 + 落库
- *  这样课程设计阶段把"文件源"换成"串口/WiFi 源"即可，算法不动。
+ *  终端职责：多文件顺序发送、循环发送、发送行数计数、开始/停止/重置，
+ *  并按标称采样率（50Hz）把原始样本送进自己的 Device 通道。
+ *
+ *  算法在 gait_algo.c，落库在 db_manager.c，本文件只负责"产数据 + 驱动"。
  * ============================================================
  */
 
@@ -32,8 +31,10 @@
 #endif
 
 #define MAX_SIM_FILES 8
+#define SIM_MAX_TERMINALS 4
 #define SAMPLE_INTERVAL_MS 20      /* 50 Hz，与数据集标称采样率一致 */
-#define SAVE_INTERVAL_SAMPLES 250  /* 每 5 s 落一次进度快照，供历史表展示 */
+#define SAVE_INTERVAL_SAMPLES 250  /* 每 5 s 落一次进度快照 */
+#define RAW_BATCH_SIZE 100         /* 每 100 个样本写一次原始数据（2 s） */
 
 typedef struct {
     int16_t gx;
@@ -60,17 +61,48 @@ static SimProfile s_profiles[] = {
     { "dailywalk", { "data2.txt", NULL },         1, true,  false, 0.10f },
     { "mixed",     { "data1.txt", "data2.txt" },  2, true,  false, 0.10f }
 };
-static const int s_profile_count = (int)(sizeof(s_profiles) / sizeof(s_profiles[0]));
 
-static char s_files[MAX_SIM_FILES][260];
-static int s_file_count = 0;
-static int s_file_index = 0;
-static int s_last_line = 0;
-static bool s_loop_mode = true;
-static bool s_stair_mode = true;
-static float s_step_thr_g = 0.18f;
-static FILE* s_current_fp = NULL;
-static char s_profile[32] = "upstairs3";
+static int s_profile_count = (int)(sizeof(s_profiles) / sizeof(s_profiles[0]));
+
+typedef struct {
+    bool          active;
+    char          device_id[DEVICE_ID_LEN];
+    int           device_index;        /* 对应 g_devices[] 下标 */
+    int           user_id;             /* 归属采集对象 */
+
+    char          files[MAX_SIM_FILES][260];
+    int           file_count;
+    int           file_index;
+    FILE*         fp;
+    long          lines;               /* 本终端发送行数 */
+
+    bool          loop_mode;
+    bool          stair_mode;
+    float         step_thr_g;
+    char          profile[32];
+
+    bool          done;                /* 单次发送已到文件末尾 */
+    unsigned long epoch;               /* 已处理到的重置序号 */
+
+    /* 原始样本批量缓冲 */
+    int16_t       raw_buf[RAW_BATCH_SIZE * 6];
+    int           raw_n;
+    double        raw_ts;
+} SimTerminal;
+
+static SimTerminal s_terms[SIM_MAX_TERMINALS];
+static int s_term_count = 0;
+static unsigned long s_reset_epoch = 0;
+
+/* ---------------- 工具 ---------------- */
+
+static void sleep_ms(int ms) {
+#ifdef _WIN32
+    Sleep(ms);
+#else
+    usleep(ms * 1000);
+#endif
+}
 
 static FILE* open_with_fallback(const char* path) {
     FILE* fp = fopen(path, "r");
@@ -87,197 +119,267 @@ static FILE* open_with_fallback(const char* path) {
 
     snprintf(candidate, sizeof(candidate), "..\\..\\%s", path);
     fp = fopen(candidate, "r");
-    if (fp) {
-        return fp;
-    }
-
-    return NULL;
+    return fp;
 }
 
-static void sleep_ms(int ms) {
-#ifdef _WIN32
-    Sleep(ms);
-#else
-    usleep(ms * 1000);
-#endif
-}
-
-static void close_current_file(void) {
-    if (s_current_fp) {
-        fclose(s_current_fp);
-        s_current_fp = NULL;
+static void term_close(SimTerminal* t) {
+    if (t->fp) {
+        fclose(t->fp);
+        t->fp = NULL;
     }
 }
 
-static bool open_current_file(void) {
-    close_current_file();
-    if (s_file_count <= 0 || s_file_index < 0 || s_file_index >= s_file_count) {
+static bool term_open(SimTerminal* t) {
+    term_close(t);
+    if (t->file_count <= 0 || t->file_index < 0 || t->file_index >= t->file_count) {
         return false;
     }
 
-    s_current_fp = open_with_fallback(s_files[s_file_index]);
-    if (!s_current_fp) {
+    t->fp = open_with_fallback(t->files[t->file_index]);
+    if (!t->fp) {
         return false;
     }
 
     char header[256];
-    if (!fgets(header, sizeof(header), s_current_fp)) {
-        close_current_file();
+    if (!fgets(header, sizeof(header), t->fp)) {
+        term_close(t);
         return false;
     }
     return true;
-}
-
-static bool open_next_file(void) {
-    if (s_file_count <= 0) {
-        return false;
-    }
-
-    int attempts = 0;
-    while (attempts < s_file_count) {
-        if (open_current_file()) {
-            return true;
-        }
-        s_file_index = (s_file_index + 1) % s_file_count;
-        attempts++;
-    }
-    return false;
 }
 
 /**
  * @brief 解析一行原始数据
  *
- * 数据格式（ReadMe 说明）：gx gy gz ax ay az，均为**有符号 16 位原始计数**。
- * 这里必须按整数读取，不能按 float 直接读——否则 65338 会被当成 65338，
- * 而不是它真正的含义 -198（这就是旧版本算法失效的根因）。
+ * 格式（ReadMe）：gx gy gz ax ay az，均为有符号 16 位原始计数。
+ * 必须按整数读，不能按 float 读——65338 的真实含义是 -198。
  */
-static bool parse_sample_line(const char* line, SensorSample* sample) {
+static bool parse_sample_line(const char* line, SensorSample* s) {
     int gx = 0, gy = 0, gz = 0, ax = 0, ay = 0, az = 0;
     if (sscanf(line, "%d %d %d %d %d %d", &gx, &gy, &gz, &ax, &ay, &az) != 6) {
         return false;
     }
-
-    sample->gx = (int16_t)gx;
-    sample->gy = (int16_t)gy;
-    sample->gz = (int16_t)gz;
-    sample->ax = (int16_t)ax;
-    sample->ay = (int16_t)ay;
-    sample->az = (int16_t)az;
+    s->gx = (int16_t)gx;
+    s->gy = (int16_t)gy;
+    s->gz = (int16_t)gz;
+    s->ax = (int16_t)ax;
+    s->ay = (int16_t)ay;
+    s->az = (int16_t)az;
     return true;
 }
 
-static bool read_next_sample(SensorSample* sample) {
-    if (s_file_count <= 0) {
+static bool term_read(SimTerminal* t, SensorSample* s) {
+    if (t->file_count <= 0) {
         return false;
     }
-
-    if (!s_current_fp) {
-        if (!open_next_file()) {
+    if (!t->fp) {
+        if (!term_open(t)) {
             return false;
         }
     }
 
     char line[256];
     while (1) {
-        if (fgets(line, sizeof(line), s_current_fp)) {
-            if (parse_sample_line(line, sample)) {
-                s_last_line++;
+        if (fgets(line, sizeof(line), t->fp)) {
+            if (parse_sample_line(line, s)) {
+                t->lines++;
                 return true;
             }
             continue;
         }
 
-        close_current_file();
-        s_file_index++;
+        /* 当前文件读完 */
+        term_close(t);
+        t->file_index++;
 
-        if (s_file_index >= s_file_count) {
-            if (!s_loop_mode) {
+        if (t->file_index >= t->file_count) {
+            if (!t->loop_mode) {
+                t->done = true;
                 return false;
             }
-            s_file_index = 0;
+            t->file_index = 0;
         }
 
-        if (!open_next_file()) {
+        if (!term_open(t)) {
+            t->done = true;
             return false;
         }
     }
 }
 
+/* ---------------- 终端与设备通道 ---------------- */
+
+static int find_profile(const char* name) {
+    if (!name) {
+        return -1;
+    }
+    for (int i = 0; i < s_profile_count; ++i) {
+        if (strcmp(name, s_profiles[i].name) == 0) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static void term_apply_profile(SimTerminal* t, int pi, int loop_override) {
+    if (pi < 0 || pi >= s_profile_count) {
+        return;
+    }
+
+    SimProfile* p = &s_profiles[pi];
+    t->file_count = 0;
+    t->file_index = 0;
+    t->lines = 0;
+    t->done = false;
+    t->loop_mode = (loop_override >= 0) ? (loop_override != 0) : p->loop_mode;
+    t->stair_mode = p->stair_mode;
+    t->step_thr_g = p->step_thr_g;
+    snprintf(t->profile, sizeof(t->profile), "%s", p->name);
+
+    for (int i = 0; i < p->file_count && i < MAX_SIM_FILES; ++i) {
+        snprintf(t->files[i], sizeof(t->files[i]), "%s", p->files[i]);
+        t->file_count++;
+    }
+
+    /* 立刻把场景参数同步到设备通道，页面在"开始"之前就能看到正确的判层/阈值 */
+    if (t->device_index >= 0) {
+        Device* d = &g_devices[t->device_index];
+        pthread_mutex_lock(&d->mutex);
+        d->gait.cfg.count_floors = t->stair_mode;
+        d->gait.cfg.step_thr_g = t->step_thr_g;
+        d->gait.cfg.step_hyst_g = t->step_thr_g * 0.5f;
+        pthread_mutex_unlock(&d->mutex);
+    }
+
+    term_close(t);
+}
+
+static void term_register(int idx, const char* device_id, const char* owner_name, int user_id) {
+    SimTerminal* t = &s_terms[idx];
+    memset(t, 0, sizeof(*t));
+    t->active = true;
+    t->user_id = user_id;
+    snprintf(t->device_id, DEVICE_ID_LEN, "%s", device_id);
+
+    t->device_index = device_ensure(device_id, device_id, "sim", user_id);
+    if (t->device_index >= 0) {
+        Device* d = &g_devices[t->device_index];
+        pthread_mutex_lock(&d->mutex);
+        snprintf(d->name, DEVICE_NAME_LEN, "%s", device_id);
+        snprintf(d->username, USERNAME_LEN, "%s", owner_name ? owner_name : "");
+        snprintf(d->source, sizeof(d->source), "sim");
+        d->in_use = true;
+        pthread_mutex_unlock(&d->mutex);
+    }
+
+    db_upsert_device(device_id, device_id, "sim", user_id, 50.0f, "LSB@2g/245dps");
+}
+
+void sim_init_terminals(void) {
+    s_term_count = 0;
+    s_reset_epoch = 0;
+
+    struct {
+        const char* id;
+        const char* owner;
+        int user_id;
+        const char* profile;
+    } defaults[] = {
+        { "SIM-01", "collector1", 1, "upstairs3" },
+        { "SIM-02", "collector2", 2, "dailywalk" }
+    };
+
+    int n = (int)(sizeof(defaults) / sizeof(defaults[0]));
+    for (int i = 0; i < n && i < SIM_MAX_TERMINALS; ++i) {
+        term_register(i, defaults[i].id, defaults[i].owner, defaults[i].user_id);
+        term_apply_profile(&s_terms[i], find_profile(defaults[i].profile), -1);
+        s_term_count++;
+    }
+
+    printf("[SIM] %d simulated terminals ready (SIM-01=upstairs3, SIM-02=dailywalk)\n", s_term_count);
+}
+
+int sim_terminal_count(void) {
+    return s_term_count;
+}
+
 void init_users(void) {
-    for (int i = 0; i < MAX_USERS; ++i) {
-        pthread_mutex_lock(&g_users[i].mutex);
-        g_users[i].current_floor = 1;
-        g_users[i].climbed_floors = 0;
-        g_users[i].total_steps = 0;
-        g_users[i].speed_per_minute = 0.0f;
-        g_users[i].sent_lines = 0;
-        g_users[i].half_flights = 0;
-        g_users[i].on_platform = false;
-        g_users[i].buffer_index = 0;
-        memset(g_users[i].accel_buffer, 0, sizeof(g_users[i].accel_buffer));
-        memset(g_users[i].gyro_buffer, 0, sizeof(g_users[i].gyro_buffer));
-        memset(g_users[i].dyn_buffer, 0, sizeof(g_users[i].dyn_buffer));
-        snprintf(g_users[i].last_event, sizeof(g_users[i].last_event), "none");
-        snprintf(g_users[i].last_hint, sizeof(g_users[i].last_hint), "none");
-        g_users[i].last_event_time = 0.0f;
-        gait_reset(&g_users[i].gait);
-        pthread_mutex_unlock(&g_users[i].mutex);
+    for (int i = 0; i < s_term_count; ++i) {
+        if (s_terms[i].device_index >= 0) {
+            device_reset_counters(s_terms[i].device_index);
+        }
+    }
+    for (int i = 0; i < MAX_DEVICES; ++i) {
+        if (g_devices[i].in_use && (s_term_count == 0)) {
+            device_reset_counters(i);
+        }
     }
 }
 
 void sim_set_data_files(const char** files, int count, bool loop_mode) {
-    s_file_count = 0;
-    s_file_index = 0;
-    s_last_line = 0;
-    s_loop_mode = loop_mode;
-
-    if (files && count > 0) {
-        int limit = count > MAX_SIM_FILES ? MAX_SIM_FILES : count;
-        for (int i = 0; i < limit; ++i) {
-            snprintf(s_files[i], sizeof(s_files[i]), "%s", files[i]);
-            s_file_count++;
+    for (int k = 0; k < s_term_count; ++k) {
+        SimTerminal* t = &s_terms[k];
+        t->file_count = 0;
+        t->file_index = 0;
+        t->lines = 0;
+        t->done = false;
+        t->loop_mode = loop_mode;
+        if (files && count > 0) {
+            int limit = count > MAX_SIM_FILES ? MAX_SIM_FILES : count;
+            for (int i = 0; i < limit; ++i) {
+                snprintf(t->files[i], sizeof(t->files[i]), "%s", files[i]);
+                t->file_count++;
+            }
         }
+        term_close(t);
     }
-
-    close_current_file();
 }
 
 bool sim_load_profile(const char* profile) {
-    return sim_load_profile_ex(profile, -1);
+    return sim_load_profile_ex(profile, -1, NULL);
 }
 
-bool sim_load_profile_ex(const char* profile, int loop_override) {
-    if (!profile) {
+bool sim_load_profile_ex(const char* profile, int loop_override, const char* device_id) {
+    int pi = find_profile(profile);
+    if (pi < 0) {
         return false;
     }
 
-    for (int i = 0; i < s_profile_count; ++i) {
-        if (strcmp(profile, s_profiles[i].name) == 0) {
-            bool loop = s_profiles[i].loop_mode;
-            if (loop_override >= 0) {
-                loop = (loop_override != 0);
-            }
-            sim_set_data_files(s_profiles[i].files, s_profiles[i].file_count, loop);
-            s_stair_mode = s_profiles[i].stair_mode;
-            s_step_thr_g = s_profiles[i].step_thr_g;
-            snprintf(s_profile, sizeof(s_profile), "%s", s_profiles[i].name);
-            return true;
+    bool target_all = (!device_id || !device_id[0] || strcmp(device_id, "all") == 0);
+    bool matched = false;
+
+    for (int i = 0; i < s_term_count; ++i) {
+        if (target_all || strcmp(s_terms[i].device_id, device_id) == 0) {
+            term_apply_profile(&s_terms[i], pi, loop_override);
+            matched = true;
         }
     }
 
-    return false;
-}
-
-bool sim_get_loop_mode(void) {
-    return s_loop_mode;
+    if (matched) {
+        printf("[SIM] profile '%s' loaded (%s)\n", profile, target_all ? "all terminals" : device_id);
+    }
+    return matched;
 }
 
 const char* sim_get_profile(void) {
-    return s_profile;
+    if (s_term_count <= 0) {
+        return "none";
+    }
+    return s_terms[0].profile;
 }
 
 bool sim_get_stair_mode(void) {
-    return s_stair_mode;
+    if (s_term_count <= 0) {
+        return false;
+    }
+    return s_terms[0].stair_mode;
+}
+
+bool sim_get_loop_mode(void) {
+    if (s_term_count <= 0) {
+        return false;
+    }
+    return s_terms[0].loop_mode;
 }
 
 void sim_start(void) {
@@ -285,22 +387,57 @@ void sim_start(void) {
         g_system_state.start_time = time(NULL);
     }
     g_system_state.simulation_running = true;
+
+    for (int i = 0; i < s_term_count; ++i) {
+        SimTerminal* t = &s_terms[i];
+        /* 上一轮已读到文件末尾：再次"开始"时从头重放 */
+        if (t->done) {
+            term_close(t);
+            t->file_index = 0;
+            t->lines = 0;
+            t->done = false;
+            t->raw_n = 0;
+        }
+        if (t->device_index >= 0) {
+            pthread_mutex_lock(&g_devices[t->device_index].mutex);
+            g_devices[t->device_index].running = true;
+            pthread_mutex_unlock(&g_devices[t->device_index].mutex);
+        }
+    }
 }
 
 void sim_stop(void) {
     g_system_state.simulation_running = false;
+    for (int i = 0; i < s_term_count; ++i) {
+        if (s_terms[i].device_index >= 0) {
+            pthread_mutex_lock(&g_devices[s_terms[i].device_index].mutex);
+            g_devices[s_terms[i].device_index].running = false;
+            pthread_mutex_unlock(&g_devices[s_terms[i].device_index].mutex);
+        }
+    }
 }
 
 void sim_reset(void) {
-    init_users();
+    s_reset_epoch++;
+
+    for (int i = 0; i < s_term_count; ++i) {
+        SimTerminal* t = &s_terms[i];
+        term_close(t);
+        t->file_index = 0;
+        t->lines = 0;
+        t->done = false;
+        t->raw_n = 0;
+        if (t->device_index >= 0) {
+            device_reset_counters(t->device_index);
+        }
+    }
+
     audio_hint_reset();
     g_total_climbed = 0;
     g_current_floor = 1;
     g_speed_per_minute = 0.0f;
     g_system_state.start_time = time(NULL);
-    s_file_index = 0;
-    s_last_line = 0;
-    close_current_file();
+    g_reset_requested = false;
 }
 
 void reset_simulation(void) {
@@ -311,171 +448,224 @@ bool sim_is_running(void) {
     return g_system_state.simulation_running;
 }
 
-int sim_get_current_floor(int user_id) {
-    if (user_id < 0 || user_id >= MAX_USERS) {
+int sim_get_current_floor(int idx) {
+    if (idx < 0 || idx >= s_term_count || s_terms[idx].device_index < 0) {
         return 1;
     }
-
-    int floor;
-    pthread_mutex_lock(&g_users[user_id].mutex);
-    floor = g_users[user_id].current_floor;
-    pthread_mutex_unlock(&g_users[user_id].mutex);
-    return floor;
+    Device* d = &g_devices[s_terms[idx].device_index];
+    pthread_mutex_lock(&d->mutex);
+    int v = d->current_floor;
+    pthread_mutex_unlock(&d->mutex);
+    return v;
 }
 
-int sim_get_total_climbed(int user_id) {
-    if (user_id < 0 || user_id >= MAX_USERS) {
+int sim_get_total_climbed(int idx) {
+    if (idx < 0 || idx >= s_term_count || s_terms[idx].device_index < 0) {
         return 0;
     }
-
-    int steps;
-    pthread_mutex_lock(&g_users[user_id].mutex);
-    steps = g_users[user_id].total_steps;
-    pthread_mutex_unlock(&g_users[user_id].mutex);
-    return steps;
+    Device* d = &g_devices[s_terms[idx].device_index];
+    pthread_mutex_lock(&d->mutex);
+    int v = d->total_steps;
+    pthread_mutex_unlock(&d->mutex);
+    return v;
 }
 
-double sim_get_speed(int user_id) {
-    if (user_id < 0 || user_id >= MAX_USERS) {
+double sim_get_speed(int idx) {
+    if (idx < 0 || idx >= s_term_count || s_terms[idx].device_index < 0) {
         return 0.0;
     }
-
-    double speed;
-    pthread_mutex_lock(&g_users[user_id].mutex);
-    speed = g_users[user_id].speed_per_minute;
-    pthread_mutex_unlock(&g_users[user_id].mutex);
-    return speed;
+    Device* d = &g_devices[s_terms[idx].device_index];
+    pthread_mutex_lock(&d->mutex);
+    double v = d->speed_per_minute;
+    pthread_mutex_unlock(&d->mutex);
+    return v;
 }
 
-int sim_get_sent_lines(int user_id) {
-    if (user_id < 0 || user_id >= MAX_USERS) {
-        return s_last_line;
+int sim_get_sent_lines(int idx) {
+    if (idx < 0 || idx >= s_term_count) {
+        return 0;
     }
-
-    int sent;
-    pthread_mutex_lock(&g_users[user_id].mutex);
-    sent = g_users[user_id].sent_lines;
-    pthread_mutex_unlock(&g_users[user_id].mutex);
-    return sent;
+    return (int)s_terms[idx].lines;
 }
 
-/** 事件 → 提示音 + 文字（供页面/日志展示） */
-static void handle_gait_events(User* user, uint32_t ev) {
+/* ---------------- 事件处理 ---------------- */
+
+static void push_event(Device* d, const char* text) {
+    snprintf(d->last_event, sizeof(d->last_event), "%s", text);
+}
+
+static void handle_gait_events(Device* d, uint32_t ev) {
     if (ev & GAIT_EV_FLOOR) {
         audio_hint_play(HINT_FLOOR);
-        snprintf(user->last_hint, sizeof(user->last_hint), "%s", audio_hint_last_text());
-        snprintf(user->last_event, sizeof(user->last_event), "到达 %d 层（%d 级台阶）",
-                 user->current_floor, user->total_steps);
+        snprintf(d->last_hint, sizeof(d->last_hint), "%s", audio_hint_last_text());
+        snprintf(d->last_event, sizeof(d->last_event), "到达 %d 层（%d 级台阶）", d->current_floor, d->total_steps);
+        db_insert_floor_event(d->device_id, "floor", d->current_floor, d->climbed_floors, d->total_steps);
+        db_insert_snapshot(d->device_id, d->current_floor, d->climbed_floors, d->total_steps, d->speed_per_minute);
         return;
     }
     if (ev & GAIT_EV_HALF) {
         audio_hint_play(HINT_HALF_FLIGHT);
-        snprintf(user->last_hint, sizeof(user->last_hint), "%s", audio_hint_last_text());
-        snprintf(user->last_event, sizeof(user->last_event), "中间平台（第 %d 个梯段，%d 级）",
-                 user->half_flights, user->total_steps);
+        snprintf(d->last_hint, sizeof(d->last_hint), "%s", audio_hint_last_text());
+        snprintf(d->last_event, sizeof(d->last_event), "中间平台（第 %d 个梯段，%d 级）", d->half_flights, d->total_steps);
+        db_insert_floor_event(d->device_id, "half", d->current_floor, d->climbed_floors, d->total_steps);
         return;
     }
     if (ev & GAIT_EV_TOP) {
         audio_hint_play(HINT_TOP_FLOOR);
-        snprintf(user->last_hint, sizeof(user->last_hint), "%s", audio_hint_last_text());
-        snprintf(user->last_event, sizeof(user->last_event), "已到 %d 层上限", g_max_floors);
+        snprintf(d->last_hint, sizeof(d->last_hint), "%s", audio_hint_last_text());
+        push_event(d, "已到 99 层上限");
+        db_insert_floor_event(d->device_id, "top", d->current_floor, d->climbed_floors, d->total_steps);
         return;
     }
     if (ev & GAIT_EV_PAUSE) {
         audio_hint_play(HINT_PAUSE);
-        snprintf(user->last_hint, sizeof(user->last_hint), "%s", audio_hint_last_text());
-        snprintf(user->last_event, sizeof(user->last_event), "平台停顿（%d 级）", user->total_steps);
+        snprintf(d->last_hint, sizeof(d->last_hint), "%s", audio_hint_last_text());
+        push_event(d, "平台停顿");
         return;
     }
     if (ev & GAIT_EV_STEP15) {
         audio_hint_play(HINT_STEP_15);
-        snprintf(user->last_hint, sizeof(user->last_hint), "%s", audio_hint_last_text());
-        snprintf(user->last_event, sizeof(user->last_event), "已走 %d 级台阶", user->total_steps);
+        snprintf(d->last_hint, sizeof(d->last_hint), "%s", audio_hint_last_text());
+        snprintf(d->last_event, sizeof(d->last_event), "已走 %d 级台阶", d->total_steps);
     }
 }
 
-void* simulator_thread_func(void* arg) {
-    (void)arg;
+/* ---------------- 线程 ---------------- */
 
+static void term_reset_if_needed(SimTerminal* t) {
+    if (t->epoch == s_reset_epoch) {
+        return;
+    }
+    t->epoch = s_reset_epoch;
+    term_close(t);
+    t->file_index = 0;
+    t->lines = 0;
+    t->done = false;
+    t->raw_n = 0;
+}
+
+void* simulator_thread_func(void* arg) {
+    int idx = (arg != NULL) ? *(int*)arg : 0;
+    if (idx < 0 || idx >= s_term_count) {
+        return NULL;
+    }
+
+    SimTerminal* t = &s_terms[idx];
     SensorSample sample = {0};
     int save_counter = 0;
 
     while (g_system_running) {
-        if (g_reset_requested || g_system_state.reset_requested) {
-            sim_reset();
-            g_reset_requested = false;
-            g_system_state.reset_requested = false;
-            save_counter = 0;
-        }
+        term_reset_if_needed(t);
 
-        if (!sim_is_running()) {
+        if (!g_system_state.simulation_running) {
             sleep_ms(50);
             continue;
         }
 
-        if (!read_next_sample(&sample)) {
-            sim_stop();
+        if (t->device_index < 0) {
             sleep_ms(100);
             continue;
         }
 
-        /* 上楼的楼层判定只对"上楼场景"生效；对照场景只验证步数/步频。
-           场景阈值随 profile 标定（上楼 0.18g / 行走 0.10g）。 */
-        GaitState* gait = &g_users[0].gait;
-        gait->cfg.count_floors = s_stair_mode;
-        gait->cfg.step_thr_g = s_step_thr_g;
-        gait->cfg.step_hyst_g = s_step_thr_g * 0.5f;
+        if (t->done) {
+            sleep_ms(100);
+            continue;
+        }
 
-        float accel_g = 0.0f;
-        float gyro_dps = 0.0f;
-        float dyn_g = 0.0f;
+        if (!term_read(t, &sample)) {
+            Device* d = &g_devices[t->device_index];
+            pthread_mutex_lock(&d->mutex);
+            d->running = false;
+            snprintf(d->last_event, sizeof(d->last_event), "数据发送结束（%ld 行）", t->lines);
+            pthread_mutex_unlock(&d->mutex);
 
+            /* 原始样本缓冲收尾 */
+            if (t->raw_n > 0) {
+                db_insert_raw_batch(t->device_id, t->raw_ts, 1.0 / 50.0, t->raw_buf, t->raw_n);
+                t->raw_n = 0;
+            }
+            db_update_device_seen(t->device_id, (long long)t->lines);
+            continue;
+        }
+
+        Device* d = &g_devices[t->device_index];
+        GaitState* gait = &d->gait;
+
+        gait->cfg.count_floors = t->stair_mode;
+        gait->cfg.step_thr_g = t->step_thr_g;
+        gait->cfg.step_hyst_g = t->step_thr_g * 0.5f;
+
+        float accel_g = 0.0f, gyro_dps = 0.0f, dyn_g = 0.0f;
         uint32_t ev = gait_feed(gait, sample.gx, sample.gy, sample.gz,
                                 sample.ax, sample.ay, sample.az,
                                 &accel_g, &gyro_dps, &dyn_g);
 
-        User* user = &g_users[0];
-        pthread_mutex_lock(&user->mutex);
-
-        user->accel_buffer[user->buffer_index] = accel_g;
-        user->gyro_buffer[user->buffer_index] = gyro_dps;
-        user->dyn_buffer[user->buffer_index] = dyn_g;
-        user->buffer_index = (user->buffer_index + 1) % DATA_BUFFER_SIZE;
-
-        user->sent_lines = s_last_line;
-        user->total_steps = (int)gait->steps;
-        user->current_floor = (int)gait->floor;
-        user->climbed_floors = (int)gait->climbed;
-        user->speed_per_minute = gait->spm;
-        user->half_flights = (int)gait->half_flights;
-        user->on_platform = gait->on_platform;
-        user->last_event_time = gait->last_event_t;
-
-        g_current_floor = user->current_floor;
-        g_total_climbed = user->climbed_floors;
-        g_speed_per_minute = user->speed_per_minute;
-
-        if (ev != 0u) {
-            handle_gait_events(user, ev);
+        /* 原始样本批量缓冲 */
+        if (t->raw_n == 0) {
+            t->raw_ts = (double)time(NULL);
+        }
+        int16_t* p = t->raw_buf + t->raw_n * 6;
+        p[0] = sample.gx; p[1] = sample.gy; p[2] = sample.gz;
+        p[3] = sample.ax; p[4] = sample.ay; p[5] = sample.az;
+        t->raw_n++;
+        if (t->raw_n >= RAW_BATCH_SIZE) {
+            db_insert_raw_batch(t->device_id, t->raw_ts, 1.0 / 50.0, t->raw_buf, t->raw_n);
+            db_update_device_seen(t->device_id, (long long)t->lines);
+            t->raw_n = 0;
         }
 
-        pthread_mutex_unlock(&user->mutex);
+        pthread_mutex_lock(&d->mutex);
+        d->accel_buffer[d->buffer_index] = accel_g;
+        d->gyro_buffer[d->buffer_index] = gyro_dps;
+        d->dyn_buffer[d->buffer_index] = dyn_g;
+        d->buffer_index = (d->buffer_index + 1) % DATA_BUFFER_SIZE;
 
-        /* 落库：到达楼层立即存，其余每 5 s 存一次进度快照（历史曲线用） */
+        d->samples_total = (long long)t->lines;
+        d->sent_lines = (int)t->lines;
+        d->total_steps = (int)gait->steps;
+        d->current_floor = (int)gait->floor;
+        d->climbed_floors = (int)gait->climbed;
+        d->speed_per_minute = gait->spm;
+        d->half_flights = (int)gait->half_flights;
+        d->on_platform = gait->on_platform;
+        d->last_event_time = gait->last_event_t;
+        d->online = true;
+        d->running = true;
+
+        if (ev != 0u) {
+            handle_gait_events(d, ev);
+        }
+
+        g_current_floor = d->current_floor;
+        g_total_climbed = d->climbed_floors;
+        g_speed_per_minute = d->speed_per_minute;
+        pthread_mutex_unlock(&d->mutex);
+
         save_counter++;
-        if ((ev & GAIT_EV_FLOOR) || save_counter >= SAVE_INTERVAL_SAMPLES) {
+        if (save_counter >= SAVE_INTERVAL_SAMPLES) {
             save_counter = 0;
-            pthread_mutex_lock(&user->mutex);
-            int f = user->current_floor;
-            int s = user->total_steps;
-            float v = user->speed_per_minute;
-            pthread_mutex_unlock(&user->mutex);
-            save_progress(user->user_id, f, s, v);
+            db_insert_snapshot(t->device_id, d->current_floor, d->climbed_floors,
+                               d->total_steps, d->speed_per_minute);
+            db_update_device_seen(t->device_id, (long long)t->lines);
         }
 
         sleep_ms(SAMPLE_INTERVAL_MS);
     }
 
-    close_current_file();
+    term_close(t);
     return NULL;
+}
+
+void sim_start_threads(void) {
+    static int args[SIM_MAX_TERMINALS];
+
+    for (int i = 0; i < s_term_count; ++i) {
+        pthread_t tid;
+        args[i] = i;
+        if (pthread_create(&tid, NULL, simulator_thread_func, &args[i]) == 0) {
+            pthread_detach(tid);
+        } else {
+            fprintf(stderr, "[SIM] failed to start terminal %d\n", i);
+        }
+    }
 }

@@ -4,64 +4,74 @@
 #include <string.h>
 #include <time.h>
 #include <stdbool.h>
+#include <ctype.h>
 
 // ==========================================================
 // 🌍 全局变量定义
 // ==========================================================
 
-// 1. 用户/设备通道数组
-// 注意：必须与 global_vars.h 中的 extern 声明匹配
-User g_users[MAX_USERS];
-
-// 2. 系统状态结构体实例
+Device g_devices[MAX_DEVICES];
 SystemState g_system_state;
 
-// 3. 其他全局统计变量
 int g_total_climbed = 0;
 int g_current_floor = 1;
 float g_speed_per_minute = 0.0f;
 int g_max_floors = MAX_FLOORS;
 
-// 4. 控制标志
 volatile bool g_system_running = false;
 volatile bool g_reset_requested = false;
+
+/* 设备注册表锁：保护 g_devices[] 的"分配/查找"动作（不含各设备内部状态） */
+static pthread_mutex_t g_registry_mutex;
+static bool g_registry_inited = false;
 
 // ==========================================================
 // ⚙️ 函数实现
 // ==========================================================
 
-/**
- * @brief 初始化所有全局变量
- *
- * 应在 main 函数开始时调用。
- */
+static void device_zero_state(Device* d) {
+    d->online = false;
+    d->running = false;
+    d->last_seen = 0;
+    d->samples_total = 0;
+    d->sent_lines = 0;
+    d->current_floor = 1;
+    d->climbed_floors = 0;
+    d->total_steps = 0;
+    d->speed_per_minute = 0.0f;
+    d->half_flights = 0;
+    d->on_platform = false;
+    d->buffer_index = 0;
+    memset(d->accel_buffer, 0, sizeof(d->accel_buffer));
+    memset(d->gyro_buffer, 0, sizeof(d->gyro_buffer));
+    memset(d->dyn_buffer, 0, sizeof(d->dyn_buffer));
+    snprintf(d->last_event, sizeof(d->last_event), "none");
+    snprintf(d->last_hint, sizeof(d->last_hint), "none");
+    d->last_event_time = 0.0f;
+    gait_reset(&d->gait);
+}
+
 void init_globals(void) {
     printf("[INIT] Initializing global variables...\n");
 
-    for (int i = 0; i < MAX_USERS; i++) {
-        User* u = &g_users[i];
-        memset(u, 0, sizeof(*u));
+    if (!g_registry_inited) {
+        pthread_mutex_init(&g_registry_mutex, NULL);
+        g_registry_inited = true;
+    }
 
-        u->user_id = i;
-        u->in_use = (i == 0);
-        snprintf(u->username, USERNAME_LEN, "Guest_%d", i);
-        snprintf(u->role, ROLE_LEN, "user");
-        snprintf(u->device_id, DEVICE_ID_LEN, "DEV_%03d", i);
-
-        u->current_floor = 1;
-        u->climbed_floors = 0;
-        u->total_steps = 0;
-        u->speed_per_minute = 0.0f;
-        u->sent_lines = 0;
-        u->half_flights = 0;
-        u->on_platform = false;
-        u->buffer_index = 0;
-        snprintf(u->last_event, sizeof(u->last_event), "none");
-        snprintf(u->last_hint, sizeof(u->last_hint), "none");
-
-        gait_init(&u->gait, NULL);   // 默认 50Hz / LSM9DS0 / 22 级每层
-
-        pthread_mutex_init(&u->mutex, NULL);
+    for (int i = 0; i < MAX_DEVICES; i++) {
+        Device* d = &g_devices[i];
+        memset(d, 0, sizeof(*d));
+        d->index = i;
+        d->in_use = false;
+        d->user_id = 0;
+        d->source[0] = '\0';
+        d->device_id[0] = '\0';
+        d->username[0] = '\0';
+        d->name[0] = '\0';
+        gait_init(&d->gait, NULL);
+        device_zero_state(d);
+        pthread_mutex_init(&d->mutex, NULL);
     }
 
     g_system_state.simulation_running = false;
@@ -79,20 +89,123 @@ void init_globals(void) {
     printf("[OK] Global initialization complete.\n");
 }
 
-/**
- * @brief 请求重置模拟
- *
- * 设置标志位，由主循环或模拟线程执行实际重置逻辑。
- */
 void request_reset(void) {
     g_reset_requested = true;
     printf("[INFO] Reset requested.\n");
 }
 
-/**
- * @brief 获取运行时间（秒）
- */
 long get_uptime_seconds(void) {
     if (g_system_state.start_time == 0) return 0;
     return (long)(time(NULL) - g_system_state.start_time);
+}
+
+// ==========================================================
+// 📡 设备注册表
+// ==========================================================
+
+int device_find(const char* device_id) {
+    if (!device_id || !device_id[0]) {
+        return -1;
+    }
+
+    int found = -1;
+    pthread_mutex_lock(&g_registry_mutex);
+    for (int i = 0; i < MAX_DEVICES; ++i) {
+        if (g_devices[i].in_use && strcmp(g_devices[i].device_id, device_id) == 0) {
+            found = i;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_registry_mutex);
+    return found;
+}
+
+int device_ensure(const char* device_id, const char* name, const char* source, int user_id) {
+    if (!device_id || !device_id[0]) {
+        return -1;
+    }
+
+    int idx = -1;
+    pthread_mutex_lock(&g_registry_mutex);
+
+    for (int i = 0; i < MAX_DEVICES; ++i) {
+        if (g_devices[i].in_use && strcmp(g_devices[i].device_id, device_id) == 0) {
+            idx = i;
+            break;
+        }
+    }
+
+    if (idx < 0) {
+        for (int i = 0; i < MAX_DEVICES; ++i) {
+            if (!g_devices[i].in_use) {
+                Device* d = &g_devices[i];
+                d->in_use = true;
+                snprintf(d->device_id, DEVICE_ID_LEN, "%s", device_id);
+                snprintf(d->name, DEVICE_NAME_LEN, "%s", (name && name[0]) ? name : device_id);
+                snprintf(d->source, sizeof(d->source), "%s", (source && source[0]) ? source : "dev");
+                d->user_id = user_id;
+                device_zero_state(d);
+                idx = i;
+                break;
+            }
+        }
+    }
+
+    pthread_mutex_unlock(&g_registry_mutex);
+
+    if (idx >= 0 && user_id > 0) {
+        g_devices[idx].user_id = user_id;
+    }
+    return idx;
+}
+
+void device_set_key(int idx, const char* key) {
+    if (idx < 0 || idx >= MAX_DEVICES) {
+        return;
+    }
+    pthread_mutex_lock(&g_devices[idx].mutex);
+    snprintf(g_devices[idx].device_key, DEVICE_KEY_LEN, "%s", key ? key : "");
+    pthread_mutex_unlock(&g_devices[idx].mutex);
+}
+
+bool device_check_key(int idx, const char* key) {
+    if (idx < 0 || idx >= MAX_DEVICES) {
+        return false;
+    }
+    bool ok;
+    pthread_mutex_lock(&g_devices[idx].mutex);
+    ok = (key && key[0] && strcmp(g_devices[idx].device_key, key) == 0);
+    pthread_mutex_unlock(&g_devices[idx].mutex);
+    return ok;
+}
+
+void device_mark_seen(int idx) {
+    if (idx < 0 || idx >= MAX_DEVICES) {
+        return;
+    }
+    pthread_mutex_lock(&g_devices[idx].mutex);
+    g_devices[idx].last_seen = time(NULL);
+    g_devices[idx].online = true;
+    pthread_mutex_unlock(&g_devices[idx].mutex);
+}
+
+void device_reset_counters(int idx) {
+    if (idx < 0 || idx >= MAX_DEVICES) {
+        return;
+    }
+    pthread_mutex_lock(&g_devices[idx].mutex);
+    device_zero_state(&g_devices[idx]);
+    pthread_mutex_unlock(&g_devices[idx].mutex);
+}
+
+int device_count_used(void) {
+    int n = 0;
+    pthread_mutex_lock(&g_registry_mutex);
+    for (int i = 0; i < MAX_DEVICES; ++i) {
+        if (g_devices[i].in_use) {
+            n++;
+        }
+    }
+    pthread_mutex_unlock(&g_registry_mutex);
+    return n;
 }

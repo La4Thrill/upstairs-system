@@ -156,6 +156,8 @@
     </div>
 
     <div class="row">
+        <label>目标终端：</label>
+        <select id="target"><option value="all">全部终端</option></select>
         <label>场景：</label>
         <select id="profile">
             <option value="upstairs3">upstairs3（上三层楼，判层）</option>
@@ -233,18 +235,34 @@
         token = data.token || '';
         document.getElementById('authState').textContent = `已登录：${data.username} (${data.role})`;
         appendLog(`登录成功：${data.username} / ${data.role}`);
+        await refreshDeviceList();
         await refreshStatus();
 
         if (timer) clearInterval(timer);
         timer = setInterval(refreshStatus, 1000);
     }
 
+    async function refreshDeviceList() {
+        const res = await fetch('/api/devices', { headers: withAuthHeaders() });
+        if (!res.ok) return;
+        const data = await res.json();
+        const sel = document.getElementById('target');
+        const prev = sel.value;
+        sel.innerHTML = '<option value="all">全部终端</option>' +
+            (data.devices || []).filter(d => d.source === 'sim')
+                .map(d => `<option value="${d.device_id}">${d.device_id}（${d.username || ''}）</option>`).join('');
+        if (prev && Array.from(sel.options).some(o => o.value === prev)) {
+            sel.value = prev;
+        }
+    }
+
     async function loadProfile() {
         const profile = document.getElementById('profile').value;
+        const target = document.getElementById('target').value;
         const res = await fetch('/api/sim/load', {
             method: 'POST',
             headers: withAuthHeaders({ 'Content-Type': 'application/json' }),
-            body: JSON.stringify({ profile })
+            body: JSON.stringify({ profile, device_id: target })
         });
 
         if (!res.ok) {
@@ -252,7 +270,8 @@
             return;
         }
         const data = await res.json();
-        appendLog(`场景已加载：${data.profile}`);
+        appendLog(`场景已加载：${data.profile} → ${data.device_id}（${data.stair_mode ? '判层' : '只计步'}）`);
+        await refreshDeviceList();
         await refreshStatus();
     }
 
@@ -274,7 +293,11 @@
         refreshing = true;
 
         try {
-            const res = await fetch('/api/status?t=' + Date.now(), {
+            const target = document.getElementById('target').value;
+            const q = (target && target !== 'all')
+                ? `device_id=${encodeURIComponent(target)}&t=${Date.now()}`
+                : `t=${Date.now()}`;
+            const res = await fetch('/api/status?' + q, {
                 headers: withAuthHeaders()
             });
 

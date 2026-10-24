@@ -1,4 +1,5 @@
 #include <stdio.h>
+
 // 线程兼容层（Windows 下使用 pthread_compat）
 #ifdef _WIN32
 #include "pthread_compat.h"
@@ -23,27 +24,23 @@ int main(void) {
 #endif
 
     init_globals();
-    init_users();
     audio_hint_init();
 
     if (init_database() != 0) {
         fprintf(stderr, "[BOOT] database init failed, continue without persistence.\n");
+    } else {
+        /* 把上次登记过的设备恢复到运行时通道表（离线状态） */
+        db_load_devices_into_runtime();
     }
 
-    sim_load_profile("upstairs3");
-
-    pthread_t sim_thread;
-    if (pthread_create(&sim_thread, NULL, simulator_thread_func, NULL) != 0) {
-        fprintf(stderr, "[BOOT] failed to create simulator thread.\n");
-        cleanup_database();
-        return 1;
-    }
+    /* 创建模拟终端：SIM-01（上楼判层）/ SIM-02（行走对照） */
+    sim_init_terminals();
+    sim_start_threads();
 
     start_web_server();
 
     g_system_running = false;
     sim_stop();
-    pthread_join(sim_thread, NULL);
     cleanup_database();
 
 #ifdef _WIN32
