@@ -10,6 +10,9 @@ build/
 # Visual Studio
 .vs/
 
+# CLion / IDEA
+.idea/
+
 # CMake
 CMakeFiles/
 CMakeCache.txt
@@ -19,6 +22,7 @@ Makefile
 # Databases and runtime files
 *.db
 *.sqlite
+*.pid
 
 # Logs
 *.log
