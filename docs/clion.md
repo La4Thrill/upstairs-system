@@ -118,7 +118,8 @@ selftest        ← 自检（SHA-256 / 口令 / 步态）
 | 现象 | 原因 / 解决 |
 |---|---|
 | `as: unknown option -- gdwarf-5`（构建失败） | CLion 自带 gcc 13 默认发 `--gdwarf-5`，但 PATH 上的 binutils 较旧（2.30 只认 `--gdwarf-2`）。仓库已在 `CMakeLists.txt` 里对 MinGW 统一加 `-gdwarf-2`，**pull 最新代码即可**；或改用另一套自带 binutils 的 MinGW（如 `F:\BaiduNetdiskDownload\mingw64`） |
-| `bind failed` 或页面打不开 | 8080 被占用（比如上次没关掉的 server）。Terminal 里 `netstat -ano \| findstr :8080` 找到 PID，`taskkill /PID <pid> /F` |
+| `bind failed on port 8080` 或页面打不开 | 8080 被占用（比如上次没关掉的 server，或 CLion 里还跑着一个实例）。**老版本这里有个坑**：Windows 的 `SO_REUSEADDR` 允许第二个实例也绑上 8080，两个进程静默共享端口，网页数字会时对时错。现在已改用 `SO_EXCLUSIVEADDRUSE`，第二个实例会明确报 `bind failed`。解决：Terminal 里 `netstat -ano \| findstr :8080` 找到 PID，`taskkill /PID <pid> /F` |
+| 网页数字时对时错、两个终端互相干扰 | 检查是不是开了两个 `server` 进程：`Get-Process server`（PowerShell）。老版本会静默双绑 8080，现在会直接报 `bind failed` |
 | 页面 404 / `html file not found` | 看控制台 `[PATH]` 那几行，按它列的候选路径检查；或者把 Working directory 设成工程根 |
 | 启动后显示"已停止"、行数不涨 | 没点"开始"；或数据文件没找到（同上） |
 | 控制台中文乱码 | **Settings → Editor → File Encodings** 全部设 UTF-8；Run 配置勾上 *Emulate terminal in output console* |

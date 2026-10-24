@@ -443,4 +443,5 @@ python tools\replay_ingest.py "D:\数据文件\数据文件\九轴数据文件\�
 | P1-8 | README 示例输出与当前代码不符（`[20.9s] FLOOR steps=22`，实际是 15.9 s）；§2 写"6 张表"实际 7 张 | 已重新生成示例输出、改正表数 |
 | P1-9 | 没有负样本回归 | 新增 `testdata/` + `tools/regress.c`，把 7 份数据一起跑，`--strict` 直接当验收脚本 |
 | P1-10 | 只能用手写 `curl` 发 2 个样本验证 ingest | 新增 `tools/replay_ingest.py`，整份数据按 50 Hz 打进 `/api/ingest` |
+| P1-13 | **Windows 下 `SO_REUSEADDR` 允许第二个 `server.exe` 静默绑定同一个 8080**：两个实例共享端口、请求随机落到其中一个，网页数字时对时错、数据库各写各的，极难排查（`docs/clion.md` "8080 被占用"那条 FAQ 的根因就是这个） | Windows 改用 `SO_EXCLUSIVEADDRUSE` 独占端口；`bind` 失败时打印端口号与 `netstat`/`taskkill` 命令。实测第二实例约 3 s 内报 `bind failed on port 8080` 后退出 |
 

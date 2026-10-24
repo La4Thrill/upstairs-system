@@ -1159,8 +1159,20 @@ void start_web_server(void) {
         return;
     }
 
+#ifdef _WIN32
+    /* Windows 上 SO_REUSEADDR 的语义和 Linux 不同：它**允许第二个进程绑定同一个端口**，
+       两个 server.exe 会"静默"共享 8080，请求随机落到其中一个实例上，
+       网页看到的数字时对时错、数据库各写各的，极难排查。
+       （docs/clion.md 里"8080 被占用"那条 FAQ 的根因就是这个。）
+       改用 SO_EXCLUSIVEADDRUSE 独占端口，第二个实例会明确 bind failed 退出。 */
+    BOOL exclusive = TRUE;
+    setsockopt(g_server_socket, SOL_SOCKET, SO_EXCLUSIVEADDRUSE,
+               (const char*)&exclusive, sizeof(exclusive));
+#else
+    /* POSIX 下 SO_REUSEADDR 只允许复用 TIME_WAIT 的端口，不会真的双绑 */
     int opt = 1;
     setsockopt(g_server_socket, SOL_SOCKET, SO_REUSEADDR, (const char*)&opt, sizeof(opt));
+#endif
 
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
@@ -1169,7 +1181,12 @@ void start_web_server(void) {
     addr.sin_port = htons(SERVER_PORT);
 
     if (bind(g_server_socket, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-        fprintf(stderr, "[WEB] bind failed\n");
+        fprintf(stderr, "[WEB] bind failed on port %d —— 端口已被占用\n", SERVER_PORT);
+        fprintf(stderr, "[WEB]   多半是上一次没关掉的 server.exe，或 CLion 里还跑着一个实例\n");
+#ifdef _WIN32
+        fprintf(stderr, "[WEB]   netstat -ano | findstr :%d   然后  taskkill /PID <pid> /F\n",
+                SERVER_PORT);
+#endif
         close_socket_safe(g_server_socket);
         g_server_socket = -1;
 #ifdef _WIN32
