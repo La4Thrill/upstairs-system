@@ -4,6 +4,7 @@
 数据：`上三层楼数据.txt`（2488 样本 @ **50 Hz**，约 49.8 s，上楼 3 层）
 
 > 硬件阶段对接说明见 **[docs/hardware-protocol.md](docs/hardware-protocol.md)**（STM32 上报协议、鉴权、端侧参考代码）。
+> 数据集是怎么采集的（手持姿势、传感器固定、轴向）见 **[docs/mounting.md](docs/mounting.md)**。
 
 ---
 
@@ -422,6 +423,8 @@ python tools\replay_ingest.py "D:\数据文件\数据文件\九轴数据文件\�
 | `tools/replay_ingest.py` | **`/api/ingest` 回放**：按 50 Hz 把 txt 打进服务端，硬件前的端到端验证 |
 | `testdata/` | 老师给的负样本数据 + `expect.txt` 期望值清单 |
 | `docs/hardware-protocol.md` | **硬件对接协议**（STM32/ESP8266）+ LSM9DS0 配置对照 |
+| `docs/mounting.md` | **采集姿势与传感器固定方式**：ReadMe 图 1~4 原图、模块丝印、从数据反推的轴向、上板检查清单 |
+| `docs/img/` | 上面几份文档用到的图片 |
 
 ---
 
