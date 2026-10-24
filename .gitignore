@@ -18,6 +18,7 @@ CMakeFiles/
 CMakeCache.txt
 cmake_install.cmake
 Makefile
+cmake-build-*/
 
 # Databases and runtime files
 *.db

@@ -17,6 +17,7 @@
 #include "global_vars.h"
 #include "audio_hint.h"
 #include "db_manager.h"
+#include "path_util.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -105,20 +106,13 @@ static void sleep_ms(int ms) {
 }
 
 static FILE* open_with_fallback(const char* path) {
-    FILE* fp = fopen(path, "r");
+    /* 先按工作目录找，再按可执行文件目录找（CLion 默认在 cmake-build-xxx 下运行） */
+    FILE* fp = asset_open(path, "r");
     if (fp) {
-        return fp;
+        printf("[SIM] 数据文件: %s\n", asset_last_path());
+    } else {
+        fprintf(stderr, "[SIM] 找不到数据文件 %s（工作目录与程序目录都试过了）\n", path);
     }
-
-    char candidate[320];
-    snprintf(candidate, sizeof(candidate), "..\\%s", path);
-    fp = fopen(candidate, "r");
-    if (fp) {
-        return fp;
-    }
-
-    snprintf(candidate, sizeof(candidate), "..\\..\\%s", path);
-    fp = fopen(candidate, "r");
     return fp;
 }
 

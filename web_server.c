@@ -23,6 +23,7 @@
 #include "simulator.h"
 #include "db_manager.h"
 #include "cjson.h"
+#include "path_util.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -63,20 +64,8 @@ static int g_server_socket = -1;
 /* ---------------- 基础工具 ---------------- */
 
 static FILE* open_text_with_fallback(const char* path) {
-    FILE* fp = fopen(path, "rb");
-    if (fp) {
-        return fp;
-    }
-
-    char candidate[320];
-    snprintf(candidate, sizeof(candidate), "..\\%s", path);
-    fp = fopen(candidate, "rb");
-    if (fp) {
-        return fp;
-    }
-
-    snprintf(candidate, sizeof(candidate), "..\\..\\%s", path);
-    return fopen(candidate, "rb");
+    /* 先按工作目录找，再按可执行文件目录找（CLion 默认在 cmake-build-xxx 下运行） */
+    return asset_open(path, "rb");
 }
 
 static void close_socket_safe(int sock) {
