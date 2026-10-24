@@ -8,6 +8,14 @@ if (MSVC)
     add_compile_options(/utf-8)
 endif()
 
+# MinGW 调试信息格式：gcc 12+ 默认 -gdwarf-5，但如果 PATH 里的 binutils 较旧
+# （例如 CLion 自带 gcc 13 遇上系统里的 binutils 2.30），汇编会报
+#   as: unknown option -- gdwarf-5
+# 统一降到 dwarf-2（新旧 binutils 都认），Debug 构建才不会挂。
+if (MINGW)
+    add_compile_options(-gdwarf-2)
+endif()
+
 # 数学库：Windows(MSVC/MinGW) 不需要，类 Unix 需要
 if (WIN32)
     set(MATH_LIB "")

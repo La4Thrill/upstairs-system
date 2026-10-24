@@ -117,6 +117,7 @@ selftest        ← 自检（SHA-256 / 口令 / 步态）
 
 | 现象 | 原因 / 解决 |
 |---|---|
+| `as: unknown option -- gdwarf-5`（构建失败） | CLion 自带 gcc 13 默认发 `--gdwarf-5`，但 PATH 上的 binutils 较旧（2.30 只认 `--gdwarf-2`）。仓库已在 `CMakeLists.txt` 里对 MinGW 统一加 `-gdwarf-2`，**pull 最新代码即可**；或改用另一套自带 binutils 的 MinGW（如 `F:\BaiduNetdiskDownload\mingw64`） |
 | `bind failed` 或页面打不开 | 8080 被占用（比如上次没关掉的 server）。Terminal 里 `netstat -ano \| findstr :8080` 找到 PID，`taskkill /PID <pid> /F` |
 | 页面 404 / `html file not found` | 看控制台 `[PATH]` 那几行，按它列的候选路径检查；或者把 Working directory 设成工程根 |
 | 启动后显示"已停止"、行数不涨 | 没点"开始"；或数据文件没找到（同上） |
