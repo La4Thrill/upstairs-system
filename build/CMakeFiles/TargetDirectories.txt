@@ -1,3 +1,0 @@
-C:/Users/Administrator/Desktop/lytm/SXL2/build/CMakeFiles/server.dir
-C:/Users/Administrator/Desktop/lytm/SXL2/build/CMakeFiles/ALL_BUILD.dir
-C:/Users/Administrator/Desktop/lytm/SXL2/build/CMakeFiles/ZERO_CHECK.dir
