@@ -169,6 +169,7 @@
             <select id="device-select" onchange="onDeviceChange()"></select>
             <button class="btn-ghost" onclick="refreshDevices()">刷新设备</button>
             <button class="btn-ghost" onclick="resetCurrentDevice()">重置当前设备</button>
+            <button class="btn-ghost" onclick="exportRaw()">导出原始数据</button>
         </div>
     </div>
     <table style="margin-top:10px;">
@@ -523,6 +524,37 @@
         setMsg(`已重置 ${currentDevice}：台阶 0、楼层 1`);
         await refreshDevices();
         await fetchStatus();
+    }
+
+    /* 把「当前查看」那个设备的原始六轴数据导出成 txt。
+       每行 gx gy gz ax ay az，和老师的数据集格式完全一致 ——
+       下载后可以直接用 algo_check.exe 离线复算，核对到底爬没爬楼。 */
+    async function exportRaw() {
+        if (!currentDevice) {
+            setMsg('请先在上面的「当前查看」里选一个设备', true);
+            return;
+        }
+        setMsg('正在导出 ' + currentDevice + ' 的原始数据……');
+        const res = await apiFetch('/api/export/raw?device_id=' + encodeURIComponent(currentDevice));
+        if (!res.ok) {
+            setMsg('导出失败：' + await res.text(), true);
+            return;
+        }
+        const txt = await res.text();
+        const lines = txt.trim() ? txt.trim().split('\n').length : 0;
+        if (lines === 0) {
+            setMsg('这台设备还没有原始数据', true);
+            return;
+        }
+        const stamp = new Date().toISOString().slice(0, 19).replace(/[-:T]/g, '');
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(new Blob([txt], { type: 'text/plain;charset=utf-8' }));
+        a.download = currentDevice + '_raw_' + stamp + '.txt';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+        setMsg(`已导出 ${lines} 行（约 ${(lines / 50).toFixed(1)} 秒 @50Hz）→ ${a.download}`);
     }
 
     async function sendCommand(cmd) {        const res = await apiFetch('/' + cmd, { method: 'POST' });

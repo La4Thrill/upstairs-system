@@ -841,6 +841,41 @@ static void handle_get(int client_sock, const char* path, const char* query, con
         return;
     }
 
+    /* 导出原始数据：每行 "gx gy gz ax ay az"，和老师的数据集同格式，
+       下载后可以直接 algo_check 离线复算，用来核对"到底爬没爬楼"。 */
+    if (strcmp(path, "/api/export/raw") == 0) {
+        if (!require_auth(client_sock, session)) {
+            return;
+        }
+
+        char want[DEVICE_ID_LEN] = {0};
+        char limit_s[16] = {0};
+        query_param(query, "device_id", want, sizeof(want));
+        query_param(query, "limit", limit_s, sizeof(limit_s));
+        int limit = limit_s[0] ? atoi(limit_s) : 0;
+
+        int err = 0;
+        int idx = resolve_device(session, want[0] ? want : NULL, &err);
+        if (idx < 0) {
+            send_text_response(client_sock, "404 Not Found",
+                               "application/json; charset=utf-8", "{}");
+            return;
+        }
+
+        char* txt = db_export_raw_text(g_devices[idx].device_id, limit);
+        if (!txt) {
+            send_text_response(client_sock, "500 Internal Server Error",
+                               "text/plain; charset=utf-8", "export failed");
+            return;
+        }
+
+        printf("[EXPORT] raw samples of %s (%zu bytes)\n",
+               g_devices[idx].device_id, strlen(txt));
+        send_text_response(client_sock, "200 OK", "text/plain; charset=utf-8", txt);
+        free(txt);
+        return;
+    }
+
     if (strcmp(path, "/api/samples") == 0) {
         if (!require_auth(client_sock, session)) {
             return;

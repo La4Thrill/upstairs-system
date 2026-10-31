@@ -47,6 +47,11 @@ bool db_insert_raw_batch(const char* device_id, double ts_start, double dfs,
                          const int16_t* samples_6n, int n);
 char* db_get_samples_json(const char* device_id, int limit);
 
+/* 导出原始样本为纯文本：每行 "gx gy gz ax ay az"，按时间正序（旧→新）。
+   limit<=0 时用默认上限。返回的字符串由调用方 free。
+   用途：拿这份数据和老师的数据集同格式对比，离线跑 algo_check 判断是否爬了楼。 */
+char* db_export_raw_text(const char* device_id, int limit);
+
 /* ---- 进度快照 / 历史 ---- */
 bool db_insert_snapshot(const char* device_id, int floor, int climbed, int steps, float speed);
 char* db_get_history_json(const char* device_id, int limit);

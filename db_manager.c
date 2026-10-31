@@ -395,6 +395,60 @@ bool db_insert_raw_batch(const char* device_id, double ts_start, double dfs,
     return ok == n;
 }
 
+char* db_export_raw_text(const char* device_id, int limit) {
+    if (!g_db || !device_id) {
+        return NULL;
+    }
+    if (limit <= 0 || limit > 200000) {
+        limit = 20000;
+    }
+
+    /* 先倒序取最近 limit 行，外层再正序输出（旧 → 新），
+       这样导出的 txt 和老师的数据集方向一致，algo_check 能直接跑。 */
+    const char* sql =
+        "SELECT gx,gy,gz,ax,ay,az FROM ("
+        "  SELECT id,gx,gy,gz,ax,ay,az FROM raw_samples "
+        "  WHERE device_id=? ORDER BY id DESC LIMIT ?"
+        ") ORDER BY id ASC;";
+
+    size_t cap = (size_t)limit * 28u + 64u;
+    char* out = (char*)malloc(cap);
+    if (!out) {
+        return NULL;
+    }
+    size_t used = 0;
+
+    db_lock();
+    sqlite3_stmt* stmt = NULL;
+    if (sqlite3_prepare_v2(g_db, sql, -1, &stmt, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, device_id, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int(stmt, 2, limit);
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            if (used + 96 > cap) {
+                size_t ncap = cap * 2;
+                char* nb = (char*)realloc(out, ncap);
+                if (!nb) {
+                    break;
+                }
+                out = nb;
+                cap = ncap;
+            }
+            int n = snprintf(out + used, cap - used, "%d %d %d %d %d %d\n",
+                             sqlite3_column_int(stmt, 0), sqlite3_column_int(stmt, 1),
+                             sqlite3_column_int(stmt, 2), sqlite3_column_int(stmt, 3),
+                             sqlite3_column_int(stmt, 4), sqlite3_column_int(stmt, 5));
+            if (n > 0) {
+                used += (size_t)n;
+            }
+        }
+        sqlite3_finalize(stmt);
+    }
+    db_unlock();
+
+    out[used] = '\0';
+    return out;
+}
+
 char* db_get_samples_json(const char* device_id, int limit) {
     if (!g_db || !device_id) {
         return json_empty_array();

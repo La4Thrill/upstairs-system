@@ -16,7 +16,7 @@
 #include "audio_hint.h"
 
 /* 数据保留策略（可在 /api/maintenance/retention 里临时覆盖） */
-#define RAW_KEEP_ROWS     20000   /* 每台设备保留的原始样本行数（≈6.7 分钟 @50Hz） */
+#define RAW_KEEP_ROWS     90000   /* 每台设备保留的原始样本行数（≈30 分钟 @50Hz） */
 #define RETENTION_DAYS    7       /* 原始样本/快照/事件的保留天数 */
 #define MAINTENANCE_SEC   60      /* 后台清理周期 */
 
