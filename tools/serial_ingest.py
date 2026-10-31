@@ -47,7 +47,13 @@ def wrap16(v):
 
 
 def parse_line(line, fields):
-    """从一行里取前 `fields` 个整数；不够就返回 None。"""
+    """从一行里取前 `fields` 个整数；不够就返回 None。
+
+    注意：从串口读出来的是 bytes，从 stdin 读出来的是 str，这里统一成 str，
+    否则 re 会报 "cannot use a string pattern on a bytes-like object"。
+    """
+    if isinstance(line, (bytes, bytearray)):
+        line = line.decode("ascii", "replace")
     nums = INT_RE.findall(line)
     if len(nums) < fields:
         return None
