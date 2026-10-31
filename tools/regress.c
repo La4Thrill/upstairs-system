@@ -29,6 +29,16 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* Windows 控制台默认代码页是 936(GBK)，而源码里的中文是 UTF-8 字节，
+   不切代码页会显示成乱码。程序启动时自己切成 UTF-8，用户不用手敲 chcp。 */
+#ifdef _WIN32
+#include <windows.h>
+#define TOOL_FIX_CONSOLE()  SetConsoleOutputCP(CP_UTF8)
+#else
+#define TOOL_FIX_CONSOLE()  ((void)0)
+#endif
+
 #include <ctype.h>
 
 #define MAX_FILES 32
@@ -168,6 +178,7 @@ static int guess_expected(const char* path) {
 }
 
 int main(int argc, char** argv) {
+    TOOL_FIX_CONSOLE();
     if (argc < 2) {
         fprintf(stderr,
                 "usage: %s <manifest.txt> [--strict]\n"

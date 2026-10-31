@@ -18,6 +18,16 @@
 
 #include <stdio.h>
 #include <string.h>
+
+/* Windows 控制台默认代码页是 936(GBK)，而源码里的中文是 UTF-8 字节，
+   不切代码页会显示成乱码。程序启动时自己切成 UTF-8，用户不用手敲 chcp。 */
+#ifdef _WIN32
+#include <windows.h>
+#define TOOL_FIX_CONSOLE()  SetConsoleOutputCP(CP_UTF8)
+#else
+#define TOOL_FIX_CONSOLE()  ((void)0)
+#endif
+
 #include <stdlib.h>
 
 static int g_pass = 0;
@@ -118,6 +128,7 @@ static void test_gait(const char* data_path) {
 }
 
 int main(int argc, char** argv) {
+    TOOL_FIX_CONSOLE();
     printf("==== 自检（不依赖服务端）====\n");
 
     test_sha256();
