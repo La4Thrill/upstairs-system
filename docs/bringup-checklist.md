@@ -21,7 +21,7 @@
 ## 第 1 步：串口先通
 
 ```
-USB 线 → 插板子左侧最上面的 Mini-USB 口（丝印 UART-USB）→ 另一头插电脑
+USB 线 → 插板子左侧【中间】那个 Mini-USB 口（丝印 UART-USB）→ 另一头插电脑
 ```
 
 **验收**：设备管理器 → 端口(COM 和 LPT) → 出现 **`USB-SERIAL CH340 (COM3)`**
@@ -54,13 +54,15 @@ while ($true) { $p.ReadLine() }
 ## 第 2 步：Keil 下载（烧固件）
 
 ```
-① USB 换插到左侧中间的 Mini-USB 口（丝印 JTAG）
+① USB 换插到左侧【最上面】那个 Mini-USB 口（丝印 JTAG）
 ② Keil 打开 D:\STM32\stair_mcu\USER\stair_mcu.uvprojx
 ③ 魔术棒(Alt+F7) → Debug 页 → Use: 选 ST-Link Debugger
 ④ 点 Settings → SW Device 里应出现 IDCODE（STM32F407）
 ⑤ 魔术棒 → Utilities 页 → 同样选 ST-Link Debugger
 ⑥ OK → 按 F8
 ```
+
+> **三个小口的位置（从上到下）**：`JTAG` → `UART-USB` → `USB-Slave`
 
 **验收**：`Build Output` 出现
 
