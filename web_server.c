@@ -935,6 +935,50 @@ static void handle_post(int client_sock, const char* path, const char* req_body,
         return;
     }
 
+    /* 只重置单个设备的计数（台阶/楼层/样本/陀螺统计），不重启进程。
+       之前只能靠重启服务端来清零，"重置"按钮又只作用于模拟终端，
+       真实设备在演示时没法归零。 */
+    if (strcmp(path, "/api/device/reset") == 0) {
+        if (!require_role_monitor_or_admin(client_sock, session)) {
+            return;
+        }
+
+        char target_id[DEVICE_ID_LEN] = {0};
+        cJSON* payload = req_body ? cJSON_Parse(req_body) : NULL;
+        if (payload) {
+            const cJSON* j_dev = cJSON_GetObjectItemCaseSensitive(payload, "device_id");
+            if (cJSON_IsString(j_dev) && j_dev->valuestring) {
+                snprintf(target_id, sizeof(target_id), "%s", j_dev->valuestring);
+            }
+            cJSON_Delete(payload);
+        }
+
+        cJSON* root = cJSON_CreateObject();
+        if (!target_id[0]) {
+            cJSON_AddStringToObject(root, "error", "missing_device_id");
+            send_json_response(client_sock, "400 Bad Request", root);
+            cJSON_Delete(root);
+            return;
+        }
+
+        int idx = device_find(target_id);
+        if (idx < 0) {
+            cJSON_AddStringToObject(root, "error", "device_not_found");
+            send_json_response(client_sock, "404 Not Found", root);
+            cJSON_Delete(root);
+            return;
+        }
+
+        device_reset_counters(idx);
+        printf("[RESET] counters cleared for device: %s\n", target_id);
+
+        cJSON_AddStringToObject(root, "status", "reset_done");
+        cJSON_AddStringToObject(root, "device_id", target_id);
+        send_json_response(client_sock, "200 OK", root);
+        cJSON_Delete(root);
+        return;
+    }
+
     if (strcmp(path, "/api/logout") == 0) {
         cJSON* root = cJSON_CreateObject();
         if (session && session->token[0] && db_session_delete(session->token)) {

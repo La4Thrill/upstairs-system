@@ -168,6 +168,7 @@
             <label class="hint">当前查看：</label>
             <select id="device-select" onchange="onDeviceChange()"></select>
             <button class="btn-ghost" onclick="refreshDevices()">刷新设备</button>
+            <button class="btn-ghost" onclick="resetCurrentDevice()">重置当前设备</button>
         </div>
     </div>
     <table style="margin-top:10px;">
@@ -493,6 +494,29 @@
         currentDevice = '';
         clearSession();
         location.reload();
+    }
+
+    /* 只重置「当前查看」里选中的那个设备（真实设备也能用），不重启服务端。 */
+    async function resetCurrentDevice() {
+        if (!currentDevice) {
+            setMsg('请先在上面的「当前查看」里选一个设备', true);
+            return;
+        }
+        if (!confirm(`确定把 ${currentDevice} 的台阶数和楼层数清零吗？（历史记录保留）`)) {
+            return;
+        }
+        const res = await apiFetch('/api/device/reset', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ device_id: currentDevice })
+        });
+        if (!res.ok) {
+            setMsg('重置失败：' + await res.text(), true);
+            return;
+        }
+        setMsg(`已重置 ${currentDevice}：台阶 0、楼层 1`);
+        await refreshDevices();
+        await fetchStatus();
     }
 
     async function sendCommand(cmd) {        const res = await apiFetch('/' + cmd, { method: 'POST' });
