@@ -39,3 +39,4 @@ _check_*.js
 .DS_Store
 tools/.device_keys.json
 *.bak
+__pycache__/
