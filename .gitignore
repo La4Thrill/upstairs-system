@@ -37,3 +37,5 @@ _check_*.js
 *~
 *.swp
 .DS_Store
+tools/.device_keys.json
+*.bak

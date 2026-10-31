@@ -46,6 +46,35 @@ def wrap16(v):
     return v - 0x10000 if v >= 0x8000 else v
 
 
+# ---------------------------------------------------------------- 设备密钥持久化
+# 服务端只在"首次登记"和"密钥丢失"时下发 key，之后必须自己带上来。
+# 这里把 key 存到脚本旁边的 .device_keys.json，下次启动自动读取，
+# 免得每次都要手工 --key（也避免忘了 key 导致 403 断采）。
+KEY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".device_keys.json")
+
+
+def load_saved_key(device_id):
+    try:
+        with open(KEY_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data.get(device_id, "")
+    except Exception:
+        return ""
+
+
+def save_key(device_id, key):
+    try:
+        data = {}
+        if os.path.exists(KEY_FILE):
+            with open(KEY_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        data[device_id] = key
+        with open(KEY_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"[WARN] 保存设备密钥失败：{e}")
+
+
 def parse_line(line, fields):
     """从一行里取前 `fields` 个整数；不够就返回 None。
 
@@ -116,7 +145,9 @@ def main():
 
     src, ser = open_source(args.port, args.baud)
     ingest = args.url.rstrip("/") + "/api/ingest"
-    key = args.key
+    key = args.key or load_saved_key(args.device)
+    if not args.key and key:
+        print(f"[KEY] 使用上次保存的密钥：{key[:6]}…")
     batch = []
     ok = fail = 0
     last = {}
@@ -147,7 +178,9 @@ def main():
             ok += 1
             if body.get("provisioned") and body.get("device_key"):
                 key = body["device_key"]
+                save_key(args.device, key)
                 print(f"[KEY] 设备已登记，key = {key}")
+                print(f"      （已保存到 {KEY_FILE}，以后不用再带 --key）")
             evs = body.get("events") or []
             if evs:
                 print(f"  events={evs} floor={body.get('current_floor')} "
