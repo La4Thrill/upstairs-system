@@ -175,6 +175,17 @@ void device_set_key(int idx, const char* key) {
     pthread_mutex_unlock(&g_devices[idx].mutex);
 }
 
+bool device_has_key(int idx) {
+    if (idx < 0 || idx >= MAX_DEVICES) {
+        return false;
+    }
+    bool has;
+    pthread_mutex_lock(&g_devices[idx].mutex);
+    has = (g_devices[idx].device_key[0] != '\0');
+    pthread_mutex_unlock(&g_devices[idx].mutex);
+    return has;
+}
+
 bool device_check_key(int idx, const char* key) {
     if (idx < 0 || idx >= MAX_DEVICES) {
         return false;

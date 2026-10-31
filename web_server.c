@@ -544,7 +544,17 @@ static void handle_ingest(int client_sock, const char* req_body, const char* dev
         db_upsert_device(device_id, cJSON_IsString(j_name) ? j_name->valuestring : device_id,
                          "dev", 0, cJSON_IsNumber(j_fs) ? (float)j_fs->valuedouble : 50.0f,
                          "LSB@2g/245dps");
+        db_set_device_key(device_id, new_key);
         printf("[INGEST] new device provisioned: %s\n", device_id);
+    } else if (!device_check_key(idx, device_key_hdr) && !device_has_key(idx)) {
+        /* 设备和库里的记录都在，但密钥为空：早期版本没把 key 落库，
+           或者服务端重启后内存里的 key 丢了。这里重新下发一个，
+           否则真实设备会永远收到 403，采集直接断掉。 */
+        gen_device_key(new_key, sizeof(new_key));
+        device_set_key(idx, new_key);
+        db_set_device_key(device_id, new_key);
+        provisioned = true;
+        printf("[INGEST] device key re-issued: %s\n", device_id);
     } else {
         if (!device_check_key(idx, device_key_hdr)) {
             cJSON_AddStringToObject(root, "error", "invalid_device_key");

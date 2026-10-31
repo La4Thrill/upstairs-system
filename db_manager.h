@@ -33,6 +33,10 @@ void cleanup_database(void);
 bool db_upsert_device(const char* device_id, const char* name, const char* source,
                       int user_id, float fs, const char* unit);
 bool db_update_device_seen(const char* device_id, long long samples_total);
+
+/* 把设备密钥落库：否则服务端一重启，内存里的 key 就没了，
+   已登记的真实设备会永远收到 403 invalid_device_key。 */
+bool db_set_device_key(const char* device_id, const char* key);
 char* db_get_devices_json(void);
 
 /** 启动时把已登记的设备恢复到运行时通道表（离线状态） */

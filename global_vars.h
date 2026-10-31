@@ -126,6 +126,7 @@ int  device_find(const char* device_id);
 int  device_ensure(const char* device_id, const char* name, const char* source, int user_id);
 void device_set_key(int idx, const char* key);
 bool device_check_key(int idx, const char* key);
+bool device_has_key(int idx);   /* 该设备是否已经分配过密钥 */
 void device_mark_seen(int idx);
 void device_reset_counters(int idx);
 int  device_count_used(void);

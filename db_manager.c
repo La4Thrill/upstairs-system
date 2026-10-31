@@ -227,6 +227,26 @@ bool db_upsert_device(const char* device_id, const char* name, const char* sourc
     return rc == SQLITE_DONE;
 }
 
+bool db_set_device_key(const char* device_id, const char* key) {
+    if (!g_db || !device_id) {
+        return false;
+    }
+
+    const char* sql = "UPDATE devices SET device_key=? WHERE device_id=?;";
+
+    db_lock();
+    sqlite3_stmt* stmt = NULL;
+    int rc = sqlite3_prepare_v2(g_db, sql, -1, &stmt, NULL);
+    if (rc == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, key ? key : "", -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 2, device_id, -1, SQLITE_TRANSIENT);
+        rc = sqlite3_step(stmt);
+        sqlite3_finalize(stmt);
+    }
+    db_unlock();
+    return rc == SQLITE_DONE;
+}
+
 bool db_update_device_seen(const char* device_id, long long samples_total) {
     if (!g_db || !device_id) {
         return false;
