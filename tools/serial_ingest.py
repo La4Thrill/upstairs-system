@@ -37,6 +37,11 @@ import time
 import urllib.error
 import urllib.request
 
+try:
+    import serial
+except ImportError:
+    serial = None
+
 INT_RE = re.compile(r"-?\d+")
 
 
@@ -125,7 +130,17 @@ def open_source(port, baud):
         print("[ERR] 需要 pyserial：pip install pyserial")
         print("      （不想装的话加 --port - 从标准输入读，可以先把串口数据重定向过来）")
         sys.exit(2)
-    ser = serial.Serial(port, baud, timeout=1)
+    # 显式关闭 DTR/RTS 再打开：
+    # 板子的 CH340 接了一键下载电路（DTR→RESET，RTS→BOOT0），
+    # serial.Serial(port, baud) 在 Windows 上会 assert DTR，
+    # 可能把 MCU 按在复位里 —— 端口能开、但永远读不到数据。
+    ser = serial.Serial()
+    ser.port = port
+    ser.baudrate = baud
+    ser.timeout = 1
+    ser.dtr = False
+    ser.rts = False
+    ser.open()
     return ser, ser
 
 
@@ -209,7 +224,46 @@ def main():
         batch.clear()
 
     try:
-        for raw in src:
+        idle = 0
+        while True:
+            try:
+                raw = src.readline()
+            except Exception as e:
+                # 串口被拔掉 / 驱动报错：关掉重连，不要退出
+                if ser is None:
+                    raise
+                print(f"[WARN] 串口读失败：{e}，2 秒后重连……")
+                try:
+                    ser.close()
+                except Exception:
+                    pass
+                time.sleep(2.0)
+                try:
+                    ser = serial.Serial()
+                    ser.port = args.port
+                    ser.baudrate = args.baud
+                    ser.timeout = 1
+                    ser.dtr = False
+                    ser.rts = False
+                    ser.open()
+                    src = ser
+                    idle = 0
+                    print("[OK] 串口已重连")
+                except Exception as e2:
+                    print(f"[ERR] 重连失败：{e2}（2 秒后继续重试）")
+                    time.sleep(2.0)
+                continue
+
+            if not raw:
+                # 关键：readline() 超时返回 b''，这不是 EOF！
+                # 以前用 for 迭代 Serial 会把它当 EOF 直接退出整个采集（踩过）。
+                if ser is None:
+                    break          # stdin 读完，正常退出
+                idle += 1
+                if idle % 30 == 0:
+                    print(f"[WAIT] 串口已经 {idle} 秒没有数据，继续等待……")
+                continue
+            idle = 0
             lines += 1
             s = parse_line(raw, args.fields)
             if s is None:
