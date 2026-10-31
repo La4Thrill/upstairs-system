@@ -197,12 +197,18 @@
         </select>
         <label class="hint"><input type="checkbox" id="loop-check" /> 循环发送</label>
         <button class="btn-primary" onclick="loadProfile()">加载文件</button>
-        <button class="btn-start" onclick="sendCommand('start')">开始</button>
-        <button class="btn-stop" onclick="sendCommand('stop')">停止</button>
-        <button class="btn-reset" onclick="sendCommand('reset')">重置</button>
+        <button class="btn-start" onclick="sendCommand('start')">开始回放</button>
+        <button class="btn-stop" onclick="sendCommand('stop')">停止回放</button>
+        <button class="btn-reset" onclick="sendCommand('reset')">重置模拟端</button>
     </div>
     <div class="hint" style="margin-top:8px;">
         SIM-01 默认"上三层楼"（判层），SIM-02 默认"日常行走"（对照，只计步）。两台终端各自独立运行、独立计数。
+    </div>
+    <div class="hint" style="margin-top:8px; color:#c0392b;">
+        ⚠️ <b>这一区域的按钮只作用于模拟终端（SIM-01 / SIM-02），对真实设备 STM32-01 无效。</b><br>
+        · 「目标终端」只影响 <b>加载文件</b> 作用于哪台模拟终端；开始/停止/重置是全局模拟端命令。<br>
+        · 真实设备的数据由串口桥（run-ingest.bat）持续上报，<b>想停就关掉那个黑窗口</b>或拔掉 USB；<br>
+        · 只想让真实设备的计数归零（不停采集）：用上方「<b>重置当前设备</b>」按钮。
     </div>
 </div>
 
