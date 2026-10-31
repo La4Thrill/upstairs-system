@@ -546,7 +546,11 @@
             setMsg('这台设备还没有原始数据', true);
             return;
         }
-        const stamp = new Date().toISOString().slice(0, 19).replace(/[-:T]/g, '');
+        /* 用本地时间做文件名（toISOString 是 UTC，会比北京时间慢 8 小时，容易看错） */
+        const now = new Date();
+        const p2 = n => String(n).padStart(2, '0');
+        const stamp = `${now.getFullYear()}${p2(now.getMonth() + 1)}${p2(now.getDate())}`
+                    + `_${p2(now.getHours())}${p2(now.getMinutes())}${p2(now.getSeconds())}`;
         const a = document.createElement('a');
         a.href = URL.createObjectURL(new Blob([txt], { type: 'text/plain;charset=utf-8' }));
         a.download = currentDevice + '_raw_' + stamp + '.txt';
