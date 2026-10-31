@@ -44,6 +44,9 @@ except ImportError:
 
 INT_RE = re.compile(r"-?\d+")
 
+# open_source() 实际打开成功的端口（可能和命令行传入的不一样，因为会自动识别）
+ACTUAL_PORT = ""
+
 
 def wrap16(v):
     """把任意整数折成有符号 16 位（端侧 printf %d 出来可能是无符号的 65533）。"""
@@ -121,6 +124,20 @@ def post_json(url, payload, headers, timeout=10.0):
         return 0, {"error": str(e)}
 
 
+def find_ch340():
+    """扫描当前所有串口，返回第一个识别为 CH340/CH341 的设备名（找不到返回 None）。"""
+    try:
+        from serial.tools import list_ports
+    except Exception:
+        return None
+    for p in list_ports.comports():
+        hwid = (p.hwid or "").upper()
+        desc = (p.description or "").upper()
+        if "1A86" in hwid or "CH340" in desc or "CH341" in desc:
+            return p.device
+    return None
+
+
 def open_source(port, baud):
     if port == "-":
         return sys.stdin, None
@@ -130,17 +147,43 @@ def open_source(port, baud):
         print("[ERR] 需要 pyserial：pip install pyserial")
         print("      （不想装的话加 --port - 从标准输入读，可以先把串口数据重定向过来）")
         sys.exit(2)
+
+    # 端口自动识别：USB 换个口 Windows 就会把 COM3 变成 COM4，
+    # 写死端口号会在演示现场直接崩，所以打不开就自动找 CH340。
+    use_port = port
+    if port.strip().lower() in ("auto", ""):
+        use_port = find_ch340()
+        if not use_port:
+            print("[ERR] 没找到 CH340 串口，检查 USB 线是否插好")
+            sys.exit(4)
+        print("[PORT] 自动识别到串口：%s" % use_port)
+
     # 显式关闭 DTR/RTS 再打开：
     # 板子的 CH340 接了一键下载电路（DTR→RESET，RTS→BOOT0），
     # serial.Serial(port, baud) 在 Windows 上会 assert DTR，
     # 可能把 MCU 按在复位里 —— 端口能开、但永远读不到数据。
     ser = serial.Serial()
-    ser.port = port
+    ser.port = use_port
     ser.baudrate = baud
     ser.timeout = 1
     ser.dtr = False
     ser.rts = False
-    ser.open()
+    try:
+        ser.open()
+    except Exception as e:
+        alt = find_ch340()
+        if alt and alt != use_port:
+            print("[PORT] %s 打不开（%s），改试自动识别的 %s" % (use_port, e, alt))
+            ser.port = alt
+            ser.open()
+        else:
+            print("[ERR] 打不开串口 %s：%s" % (use_port, e))
+            print("      当前系统里的串口：%s" %
+                  ", ".join(p.device for p in __import__("serial.tools.list_ports",
+                                                         fromlist=["comports"]).comports()))
+            sys.exit(4)
+    global ACTUAL_PORT
+    ACTUAL_PORT = ser.port
     return ser, ser
 
 
@@ -174,7 +217,8 @@ def main():
     skipped = 0
     t0 = time.time()
 
-    print(f"来源    : {args.port}" + (f" @ {args.baud}" if args.port != '-' else " (stdin)"))
+    shown_port = ACTUAL_PORT or args.port
+    print(f"来源    : {shown_port}" + (f" @ {args.baud}" if shown_port != '-' else " (stdin)"))
     print(f"目标    : {ingest}   设备 {args.device}   fs={args.fs:g}")
     print(f"每行取  : 前 {args.fields} 个整数" + ("   [dry-run]" if args.dry_run else ""))
     print("-" * 62)
