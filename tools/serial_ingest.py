@@ -52,6 +52,10 @@ def wrap16(v):
 # 免得每次都要手工 --key（也避免忘了 key 导致 403 断采）。
 KEY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".device_keys.json")
 
+# 服务端重启时的重连策略：每 0.5s 试一次，最多 60 次（约 30 秒）
+RETRY_TIMES = 60
+RETRY_INTERVAL = 0.5
+
 
 def load_saved_key(device_id):
     try:
@@ -170,10 +174,23 @@ def main():
             payload["name"] = args.name
         if args.user and not key:
             payload["user"] = args.user
-        status, body = post_json(ingest, payload, {"X-Device-Key": key})
+        # 服务端可能正在重启：重试一段时间，别让整个采集直接挂掉。
+        # （以前这里是 raise SystemExit(3)，服务端崩一次桥就死了，必须人工重开。）
+        status, body = 0, {}
+        for attempt in range(1, RETRY_TIMES + 1):
+            status, body = post_json(ingest, payload, {"X-Device-Key": key})
+            if status != 0:
+                if attempt > 1:
+                    print(f"[OK] 服务端恢复（重试 {attempt - 1} 次后连上）")
+                break
+            if attempt == 1:
+                print("[WAIT] 服务端暂时连不上，正在重试……")
+            time.sleep(RETRY_INTERVAL)
         if status == 0:
-            print(f"[ERR] 连不上服务端：{body.get('error')}")
-            raise SystemExit(3)
+            fail += 1
+            print(f"[ERR] 服务端一直连不上，丢弃本批 {len(batch)} 个样本（继续采集）")
+            batch.clear()
+            return
         if status == 200:
             ok += 1
             if body.get("provisioned") and body.get("device_key"):
