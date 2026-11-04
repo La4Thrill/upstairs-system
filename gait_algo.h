@@ -44,6 +44,11 @@
 /* 滑动平均窗最大长度（fs 上限 2000 Hz 时 100 ms = 200 点，这里按 32 点封顶） */
 #define GAIT_WIN_MAX            32
 
+/* 瞬时步频：窗口内保留最近几步的时刻 */
+#define GAIT_SPM_WIN            8
+#define GAIT_SPM_IDLE_S         3.0f    /* 超过这么久没有新台阶 → 认为停下，步频归零 */
+#define GAIT_SPM_MAX            300.0f  /* 上限，防异常值 */
+
 /* ---- 算法配置（可运行时标定） ---- */
 typedef struct {
     float    fs;                 /* 采样率 Hz，数据集为 50 */
@@ -86,7 +91,10 @@ typedef struct {
     uint16_t mid_platforms;      /* 其中真正的「中间平台」（半层，不含楼层平台） */
     uint8_t  climbed;            /* 已上楼数（0..98），楼层 = 1 + climbed */
     uint8_t  floor;              /* 当前楼层（1..99） */
-    float    spm;                /* 步频（步/分） */
+    float    spm;                /* 步频（级/分）—— 最近 N 步的瞬时节奏 */
+    float    step_t[GAIT_SPM_WIN]; /* 最近若干步的时刻（模拟时间，秒） */
+    uint8_t  step_t_i;           /* 环形缓冲写指针 */
+    uint8_t  step_t_n;           /* 已记录步数（<= GAIT_SPM_WIN） */
     float    last_event_t;       /* 最近一次事件时刻（秒，模拟时间） */
     bool     top_notified;       /* 已提示到达最高层 */
     uint8_t  last_event;         /* 最近一次事件位 */

@@ -132,6 +132,11 @@ static void gait_clear_counts(GaitState* st) {
     st->climbed = 0;
     st->floor = 1;
     st->spm = 0.0f;
+    for (int i = 0; i < GAIT_SPM_WIN; ++i) {
+        st->step_t[i] = 0.0f;
+    }
+    st->step_t_i = 0;
+    st->step_t_n = 0;
     st->last_event_t = 0.0f;
     st->top_notified = false;
     st->last_event = 0;
@@ -228,6 +233,17 @@ uint32_t gait_feed(GaitState* st,
         st->armed = false;
         st->since_step = 0;
         st->steps++;
+
+        /* 记录这一步的时刻，供瞬时步频使用（模拟时间，不受 Sleep 抖动影响） */
+        {
+            float now_s = (float)st->samples / cfg->fs;
+            st->step_t[st->step_t_i] = now_s;
+            st->step_t_i = (uint8_t)((st->step_t_i + 1u) % GAIT_SPM_WIN);
+            if (st->step_t_n < GAIT_SPM_WIN) {
+                st->step_t_n++;
+            }
+        }
+
         ev |= GAIT_EV_STEP;
 
         if (st->steps % cfg->steps_per_half == 0u) {
@@ -276,14 +292,35 @@ uint32_t gait_feed(GaitState* st,
         st->on_platform = false;
     }
 
-    /* ---------- 6. 步频（按模拟时间，不受 Sleep 抖动影响） ---------- */
+    /* ---------- 6. 步频：最近 N 步的瞬时节奏 ----------
+       以前是 steps*60/全程时长 = 全程平均：板子开着不动数字就一路往下掉，
+       真爬楼时反而涨不上去，也没法和数据集基线（82 级/分）对比。
+       现在只看最近 GAIT_SPM_WIN 步；超过 GAIT_SPM_IDLE_S 没有新台阶则归零。 */
     {
         float t_s = (float)st->samples / cfg->fs;
-        if (t_s >= 3.0f) {
-            st->spm = (float)st->steps * 60.0f / t_s;
-        } else {
-            st->spm = 0.0f;
+        float spm = 0.0f;
+
+        if (st->step_t_n >= 2u) {
+            uint8_t oldest_i = (uint8_t)((st->step_t_i + GAIT_SPM_WIN - st->step_t_n) % GAIT_SPM_WIN);
+            uint8_t newest_i = (uint8_t)((st->step_t_i + GAIT_SPM_WIN - 1u) % GAIT_SPM_WIN);
+            float dt = st->step_t[newest_i] - st->step_t[oldest_i];
+            if (dt > 0.05f) {
+                spm = (float)(st->step_t_n - 1u) * 60.0f / dt;
+            }
         }
+
+        /* 停下就把步频清掉，别让旧值一直挂着 */
+        if (st->step_t_n > 0u) {
+            uint8_t newest_i = (uint8_t)((st->step_t_i + GAIT_SPM_WIN - 1u) % GAIT_SPM_WIN);
+            if (t_s - st->step_t[newest_i] > GAIT_SPM_IDLE_S) {
+                spm = 0.0f;
+            }
+        }
+
+        if (spm > GAIT_SPM_MAX) {
+            spm = GAIT_SPM_MAX;
+        }
+        st->spm = spm;
     }
 
     if (ev != 0u) {

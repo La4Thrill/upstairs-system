@@ -63,6 +63,8 @@ int main(int argc, char** argv) {
     char line[512];
     int lines = 0;
     int events = 0;
+    float spm_peak = 0.0f;   /* 全程出现过的最高瞬时步频（停下后 st.spm 会归零，看峰值更有意义） */
+    float spm_end = 0.0f;
 
     /* 跳过表头 */
     if (!fgets(line, sizeof(line), fp)) {
@@ -82,6 +84,11 @@ int main(int argc, char** argv) {
                                 (int16_t)ax, (int16_t)ay, (int16_t)az,
                                 &accel_g, &gyro_dps, &dyn_g);
 
+        if (st.spm > spm_peak) {
+            spm_peak = st.spm;
+        }
+        spm_end = st.spm;
+
         if (ev & GAIT_EV_FLOOR) {
             events++;
             printf("  [%6.1fs] FLOOR     floor=%-2d steps=%-3d |a|=%.2fg dyn=%.2fg\n",
@@ -100,7 +107,10 @@ int main(int argc, char** argv) {
     float dur = (float)st.samples / st.cfg.fs;
     printf("\nfile      : %s\n", path);
     printf("samples   : %u  (%.1fs @ %.0fHz)\n", st.samples, dur, st.cfg.fs);
-    printf("steps     : %u   (平均 %.1f 级/分)\n", st.steps, dur > 0.0f ? st.steps * 60.0f / dur : 0.0f);
+    printf("steps     : %u   全程平均 %.1f 级/分   瞬时峰值 %.1f 级/分（结束时 %.1f）\n",
+           st.steps,
+           dur > 0.0f ? st.steps * 60.0f / dur : 0.0f,
+           spm_peak, spm_end);
     printf("half      : %u 个梯段（其中中间平台 %u 个，不含楼层平台）\n",
            st.half_flights, st.mid_platforms);
     printf("floor     : 已上楼 %u 层，当前 %u 层（每层 %u 级）\n",
