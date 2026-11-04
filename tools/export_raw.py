@@ -72,15 +72,24 @@ def main():
         print("[ERR] 这台设备还没有原始数据")
         return 5
 
+    # 课题数据集第一行是表头（gx gy gz ax ay az），这里与之保持一致；
+    # 若服务端以后自己带表头了，也不重复添加。
+    head = lines[0].split()
+    need_header = bool(head and head[0].lstrip("-").isdigit())   # 首行是数字 = 数据行 -> 需要补表头
+    if need_header:
+        lines = ["gx     gy    gz     ax    ay    az"] + lines
+
     stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     outdir = args.out or os.getcwd()
-    name = f"{args.device}_raw_{stamp}_{len(lines)}samples.txt"
+    data_lines = len(lines) - (1 if need_header else 0)
+    name = f"{args.device}_raw_{stamp}_{data_lines}samples.txt"
     path = os.path.join(outdir, name)
     with open(path, "w", encoding="ascii", newline="\n") as f:
         f.write("\n".join(lines) + "\n")
 
     print(f"[3/3] 已保存: {path}")
-    print(f"      行数 {len(lines)}  时长 {len(lines)/FS:.1f} 秒 @50Hz")
+    tail = "（另含 1 行表头）" if need_header else ""
+    print(f"      数据行数 {data_lines}  时长 {data_lines/FS:.1f} 秒 @50Hz{tail}")
     print(f"      校验：algo_check {os.path.basename(path)} 1")
     return 0
 
